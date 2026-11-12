@@ -189,12 +189,14 @@ class Server {
             {default: authRouter},
             {default: userRouter},
             {default: appRouter},
-            {default: cacheRouter}
+            {default: cacheRouter},
+            {default: aiRouter}
         ] = await Promise.all([
             import('./routes/auth.routes.js'),
             import('./routes/user.routes.js'),
             import('./routes/app.routes.js'),
-            import('./routes/cache.routes.js')
+            import('./routes/cache.routes.js'),
+            import('./routes/ai.routes.js')
         ]);
 
         appMiddleware.registerRoutes([
@@ -202,7 +204,8 @@ class Server {
             ...appRouter.validRoutes,
             ...authRouter.validRoutes,
             ...userRouter.validRoutes,
-            ...cacheRouter.validRoutes
+            ...cacheRouter.validRoutes,
+            ...aiRouter.validRoutes
         ]);
 
         // Apply route validation middleware specifically to /api routes
@@ -212,6 +215,7 @@ class Server {
         this.app.use('/api/v1/auth', authRouter);
         this.app.use('/api/v1/users', userRouter);
         this.app.use('/api/v1/cache', cacheRouter);
+        this.app.use('/api/v1', aiRouter);
         this.app.use('/api/v1', appRouter);
 
         // Handle undefined routes
@@ -234,6 +238,9 @@ class Server {
 
             const {seedPresetThemes} = await import('./config/preset.themes.js');
             await seedPresetThemes();
+
+            const {downloads} = await import('./controllers/ai.controller.js');
+            await downloads.recover();
 
             return this.dbConnection;
         } catch (error) {
