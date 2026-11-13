@@ -4,7 +4,7 @@ import * as authMiddleware from '../middleware/auth.middleware.js';
 import { RIGHTS } from '../config/rights.js';
 import { noCacheResponse } from '../middleware/cache.middleware.js';
 import { validateRequest } from '../middleware/validation.middleware.js';
-import { deviceSchemas, modelSchemas } from '../models/ai.model.js';
+import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas } from '../models/ai.model.js';
 
 const router = Router();
 
@@ -20,13 +20,30 @@ router.validRoutes = [
     '/api/v1/models/show',
     '/api/v1/models/delete',
     '/api/v1/models/create',
+    '/api/v1/models/update',
     '/api/v1/models/unload',
+    '/api/v1/models/load',
     '/api/v1/models/pull',
     '/api/v1/models/downloads',
     '/api/v1/models/downloads/stream',
     '/api/v1/models/downloads/cancel',
     '/api/v1/catalogue',
-    '/api/v1/devices/:id/catalogue'
+    '/api/v1/devices/:id/catalogue',
+    '/api/v1/chats',
+    '/api/v1/chats/:id',
+    '/api/v1/chats/:id/messages',
+    '/api/v1/chats/:id/reply',
+    '/api/v1/chats/:id/stop',
+    '/api/v1/chats/:id/summary',
+    '/api/v1/chats/:id/attachments',
+    '/api/v1/chats/:id/attachments/:attachmentId',
+    '/api/v1/chats/:id/export',
+    '/api/v1/prompts',
+    '/api/v1/prompts/:id',
+    '/api/v1/files/browse',
+    '/api/v1/files/text',
+    '/api/v1/files/save',
+    '/api/v1/files/remote'
 ];
 
 const signedIn = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.USE_MODELS), noCacheResponse()];
@@ -51,7 +68,9 @@ router.get('/models/running', ...signedIn, aiController.listRunning);
 router.post('/models/show', ...signedIn, named, aiController.showModel);
 router.post('/models/delete', ...manager, named, aiController.deleteModel);
 router.post('/models/unload', ...manager, named, aiController.unloadModel);
+router.post('/models/load', ...signedIn, validateRequest(modelSchemas.load), aiController.loadModel);
 router.post('/models/create', ...manager, validateRequest(modelSchemas.create), aiController.createModel);
+router.post('/models/update', ...manager, validateRequest(modelSchemas.update), aiController.updateModel);
 
 router.post('/models/pull', ...manager, named, aiController.startDownload);
 router.get('/models/downloads', ...signedIn, aiController.listDownloads);
@@ -60,5 +79,32 @@ router.post('/models/downloads/cancel', ...manager, validateRequest(modelSchemas
 
 router.get('/catalogue', noCacheResponse(), validateRequest(modelSchemas.catalogueQuery, 'query'), aiController.getPublicCatalogue);
 router.get('/devices/:id/catalogue', ...signedIn, withDeviceId, aiController.getDeviceCatalogue);
+
+const withChatId = validateRequest(chatSchemas.chatId, 'params');
+
+router.get('/chats', ...signedIn, validateRequest(chatSchemas.list, 'query'), aiController.listChats);
+router.post('/chats', ...signedIn, validateRequest(chatSchemas.create), aiController.createChat);
+router.get('/chats/:id', ...signedIn, withChatId, aiController.getChat);
+router.patch('/chats/:id', ...signedIn, withChatId, validateRequest(chatSchemas.update), aiController.updateChat);
+router.delete('/chats/:id', ...signedIn, withChatId, aiController.deleteChat);
+router.post('/chats/:id/messages', ...signedIn, withChatId, validateRequest(chatSchemas.send), aiController.sendMessage);
+router.get('/chats/:id/reply', ...signedIn, withChatId, aiController.rejoinReply);
+router.post('/chats/:id/stop', ...signedIn, withChatId, aiController.stopReply);
+router.post('/chats/:id/summary', ...signedIn, withChatId, aiController.summariseChat);
+router.post('/chats/:id/attachments', ...signedIn, withChatId, aiController.receiveUpload, aiController.addAttachment);
+router.delete('/chats/:id/attachments/:attachmentId', ...signedIn, validateRequest(chatSchemas.attachmentId, 'params'), aiController.removeAttachment);
+router.get('/chats/:id/export', ...signedIn, withChatId, validateRequest(chatSchemas.exportQuery, 'query'), aiController.exportChat);
+
+const withPromptId = validateRequest(promptSchemas.promptId, 'params');
+
+router.get('/prompts', ...signedIn, aiController.listPrompts);
+router.post('/prompts', ...signedIn, validateRequest(promptSchemas.create), aiController.createPrompt);
+router.patch('/prompts/:id', ...signedIn, withPromptId, validateRequest(promptSchemas.update), aiController.updatePrompt);
+router.delete('/prompts/:id', ...signedIn, withPromptId, aiController.deletePrompt);
+
+router.get('/files/browse', ...signedIn, validateRequest(chatSchemas.browse, 'query'), aiController.browseFiles);
+router.get('/files/text', ...signedIn, validateRequest(chatSchemas.fileText, 'query'), aiController.readFileText);
+router.get('/files/remote', ...signedIn, validateRequest(chatSchemas.remote, 'query'), aiController.loadRemote);
+router.post('/files/save', ...signedIn, validateRequest(chatSchemas.fileSave), aiController.saveFile);
 
 export default router;

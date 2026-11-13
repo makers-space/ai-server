@@ -115,6 +115,7 @@ class Server {
             'MONGODB_URI',
             'NODE_ENV',
             'OLLAMA_BASE_URL',
+            'FILESYSTEM_ONE_URL',
             'PORT',
             'RATE_LIMIT_AUTH_MAX_REQUESTS',
             'RATE_LIMIT_AUTH_WINDOW_MS',

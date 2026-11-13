@@ -123,6 +123,10 @@ export const modelSchemas = {
         name: modelName.required()
     }),
 
+    load: Joi.object({
+        name: modelName.allow(null, '')
+    }),
+
     create: Joi.object({
         name: Joi.string().min(1).max(63).pattern(/^[a-z0-9][a-z0-9._-]*$/).required()
             .messages({ 'string.pattern.base': 'Use lower-case letters, digits, dots, dashes and underscores only' }),
@@ -135,6 +139,16 @@ export const modelSchemas = {
             Joi.alternatives().try(Joi.string().max(500), Joi.number(), Joi.boolean())
         ).max(30)
     }),
+    update: Joi.object({
+        name: modelName.required(),
+        displayName: Joi.string().trim().min(1).max(80),
+        from: modelName,
+        system: Joi.string().max(20000).allow(''),
+        parameters: Joi.object().pattern(
+            Joi.string().max(60),
+            Joi.alternatives().try(Joi.string().max(500), Joi.number(), Joi.boolean())
+        ).max(30)
+    }).or('displayName', 'from', 'system', 'parameters'),
 
     downloadAction: Joi.object({
         id: Joi.objectId().required(),
@@ -144,5 +158,130 @@ export const modelSchemas = {
     catalogueQuery: Joi.object({
         memoryMb: megabytes,
         gpuMemoryMb: megabytes
+    })
+};
+
+const chatAttachmentSchema = new mongoose.Schema({
+    name: { type: String, required: true, maxlength: 255 },
+    source: { type: String, enum: [SERVICE, 'fs-one'], default: SERVICE },
+    path: { type: String, default: null },
+    text: { type: String, required: true },
+    chars: { type: Number, required: true },
+    tokens: { type: Number, required: true },
+    sent: { type: Boolean, default: false }
+}, { timestamps: { createdAt: true, updatedAt: false } });
+
+const chatMessageSchema = new mongoose.Schema({
+    role: { type: String, enum: ['user', 'assistant'], required: true },
+    content: { type: String, default: '' },
+    thinking: { type: String, default: '' },
+    model: { type: String, default: null },
+    stats: {
+        evalCount: { type: Number, default: null },
+        promptEvalCount: { type: Number, default: null },
+        durationMs: { type: Number, default: null },
+        tokensPerSecond: { type: Number, default: null }
+    },
+    errorCode: { type: String, default: null },
+    stopped: { type: Boolean, default: false },
+    steps: { type: [new mongoose.Schema({ tool: String, input: String, failed: String }, { _id: false })], default: [] },
+    unverified: { type: [String], default: [] },
+    attachmentIds: { type: [mongoose.Schema.Types.ObjectId], default: [] }
+}, { timestamps: { createdAt: true, updatedAt: false } });
+
+const instructionSchema = new mongoose.Schema({
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    text: { type: String, required: true },
+    source: { type: String, enum: [SERVICE, 'fs-one'], default: SERVICE },
+    path: { type: String, default: null }
+}, { _id: false });
+
+const promptSchema = new mongoose.Schema({
+    service: { type: String, default: SERVICE, immutable: true, index: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    text: { type: String, required: true },
+    source: { type: String, enum: [SERVICE, 'fs-one'], default: SERVICE },
+    path: { type: String, default: null }
+}, { timestamps: true });
+
+export const Prompt = mongoose.models.Prompt || mongoose.model('Prompt', promptSchema);
+
+const chatSchema = new mongoose.Schema({
+    service: { type: String, default: SERVICE, immutable: true, index: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    title: { type: String, default: 'New chat', trim: true, maxlength: 120 },
+    titled: { type: Boolean, default: false },
+    model: { type: String, default: null },
+    system: { type: String, default: '' },
+    systemSource: { type: String, default: null },
+    instructions: { type: [instructionSchema], default: [] },
+    summary: { type: String, default: '' },
+    continuedFrom: { type: mongoose.Schema.Types.ObjectId, default: null },
+    options: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+    messages: { type: [chatMessageSchema], default: [] },
+    attachments: { type: [chatAttachmentSchema], default: [] }
+}, { timestamps: true, minimize: false });
+
+chatSchema.index({ service: 1, owner: 1, updatedAt: -1 });
+
+export const Chat = mongoose.models.Chat || mongoose.model('Chat', chatSchema);
+
+const generationOptions = Joi.object({
+    temperature: Joi.number().min(0).max(2),
+    num_ctx: Joi.number().integer().min(512).max(262144),
+    top_p: Joi.number().min(0).max(1),
+    top_k: Joi.number().integer().min(0).max(500),
+    repeat_penalty: Joi.number().min(0).max(5),
+    seed: Joi.number().integer(),
+    num_predict: Joi.number().integer().min(-1).max(100000)
+});
+
+const filePath = Joi.string().min(1).max(1000).pattern(/^\/(?!.*\/\/)[^\0]*$/)
+    .messages({ 'string.pattern.base': 'A file path starts with / and has no empty parts' });
+
+const instruction = {
+    name: Joi.string().trim().min(1).max(120).required(),
+    text: Joi.string().min(1).max(100000).required(),
+    source: Joi.string().valid(SERVICE, 'fs-one'),
+    path: Joi.string().max(1000).allow(null, '')
+};
+
+export const promptSchemas = {
+    promptId: Joi.object({ id: Joi.objectId().required() }),
+    create: Joi.object(instruction),
+    update: Joi.object({ name: instruction.name.optional(), text: instruction.text.optional() }).min(1)
+};
+
+const chatFields = {
+    title: Joi.string().trim().min(1).max(120),
+    model: modelName.allow(null),
+    system: Joi.string().max(100000).allow(''),
+    systemSource: Joi.string().max(1000).allow(null, ''),
+    instructions: Joi.array().max(10).items(Joi.object(instruction)),
+    options: generationOptions
+};
+
+export const chatSchemas = {
+    chatId: Joi.object({ id: Joi.objectId().required() }),
+    attachmentId: Joi.object({ id: Joi.objectId().required(), attachmentId: Joi.objectId().required() }),
+    list: Joi.object({ search: Joi.string().trim().max(100).allow('') }),
+    create: Joi.object(chatFields),
+    update: Joi.object(chatFields).min(1),
+    send: Joi.object({
+        content: Joi.string().min(1).max(100000),
+        regenerate: Joi.boolean(),
+        editIndex: Joi.number().integer().min(0).max(199)
+    }).or('content', 'regenerate').without('regenerate', ['content', 'editIndex']).with('editIndex', 'content'),
+    attachUpload: Joi.object({ name: Joi.string().trim().min(1).max(255).required() }),
+    attachFile: Joi.object({ path: filePath.required() }),
+    exportQuery: Joi.object({ format: Joi.string().valid('markdown', 'jsonl').default('markdown') }),
+    browse: Joi.object({ path: filePath.default('/') }),
+    remote: Joi.object({ url: Joi.string().uri({ scheme: ['http', 'https'] }).max(2000).required() }),
+    fileText: Joi.object({ path: filePath.required(), model: modelName }),
+    fileSave: Joi.object({
+        folder: filePath.required(),
+        name: Joi.string().trim().min(1).max(200).pattern(/^[^\\/\0]+$/).required(),
+        content: Joi.string().min(1).max(2000000).required()
     })
 };
