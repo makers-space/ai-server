@@ -207,6 +207,28 @@ const promptSchema = new mongoose.Schema({
 
 export const Prompt = mongoose.models.Prompt || mongoose.model('Prompt', promptSchema);
 
+export const GUIDE_STEPS = [
+    'nav.chat', 'nav.models', 'nav.devices', 'nav.settings',
+    'chat.send', 'chat.new',
+    'models.installed', 'models.running', 'models.mine', 'models.refresh', 'models.download',
+    'devices.read', 'devices.correct'
+];
+export const MANAGER_GUIDE_STEPS = ['models.download', 'devices.read', 'devices.correct'];
+
+const guideSchema = new mongoose.Schema({
+    service: { type: String, default: SERVICE, immutable: true, index: true },
+    user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    on: { type: Boolean, default: true },
+    seen: { type: [String], default: [] }
+}, { timestamps: true });
+guideSchema.index({ service: 1, user: 1 }, { unique: true });
+
+export const Guide = mongoose.models.Guide || mongoose.model('Guide', guideSchema);
+export const guideSchemas = {
+    update: Joi.object({ on: Joi.boolean().required() }),
+    seen: Joi.object({ key: Joi.string().valid(...GUIDE_STEPS).required() })
+};
+
 const chatSchema = new mongoose.Schema({
     service: { type: String, default: SERVICE, immutable: true, index: true },
     owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },

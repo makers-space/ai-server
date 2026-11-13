@@ -5,6 +5,8 @@ import cors from 'cors';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import logger from '../utils/app.logger.js';
+import jwt from 'jsonwebtoken';
+import WebSocket from 'ws';
 import redis from 'redis';
 import {sanitizeObject} from '../utils/sanitize.js';
 
@@ -658,7 +660,177 @@ const handleUndefinedRoutes = (app) => {
     });
 };
 
+/**
+ * Notification service: one WebSocket per signed-in browser tab on /notifications.
+ * Everything the server reports to a user goes through here, so a page never
+ * raises the same notice twice.
+ */
+class NotificationService {
+    constructor() {
+        this.connections = new Map(); // userId -> Set of WebSocket connections
+        this.userSessions = new Map(); // userId -> user info
+    }
+
+    initialize() {
+        logger.info('🔔 Notification service initialized on /notifications path');
+    }
+
+    async handleConnection(ws, req) {
+        try {
+            const url = new URL(req.url, `http://${req.headers.host}`);
+            const token = url.searchParams.get('token') || req.headers.authorization?.replace('Bearer ', '');
+
+            if (!token) {
+                ws.close(1008, 'Authentication token required');
+                return;
+            }
+
+            const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
+            const userId = String(decoded.id);
+
+            if (!this.connections.has(userId)) {
+                this.connections.set(userId, new Set());
+            }
+            this.connections.get(userId).add(ws);
+            this.userSessions.set(userId, { id: userId, username: decoded.username, roles: decoded.roles || [], connectedAt: new Date() });
+
+            ws.on('close', () => this.removeConnection(userId, ws));
+            ws.on('message', (data) => this.handleMessage(userId, ws, data));
+
+            this.sendToConnection(ws, {
+                type: 'connection:established',
+                data: { userId, timestamp: new Date().toISOString() }
+            });
+        } catch (error) {
+            if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+                logger.warn('Invalid JWT token for notification WebSocket', { error: error.message });
+                ws.close(1008, 'Invalid authentication token');
+            } else {
+                logger.error('Notification WebSocket authentication failed:', error);
+                ws.close(1008, 'Authentication failed');
+            }
+        }
+    }
+
+    handleMessage(userId, ws, data) {
+        try {
+            const message = JSON.parse(data);
+            if (message.type === 'ping') this.sendToConnection(ws, { type: 'pong', timestamp: new Date().toISOString() });
+        } catch (error) {
+            logger.error('Error handling WebSocket message:', error);
+        }
+    }
+
+    removeConnection(userId, ws) {
+        const userConnections = this.connections.get(userId);
+        if (userConnections) {
+            userConnections.delete(ws);
+            if (userConnections.size === 0) {
+                this.connections.delete(userId);
+                this.userSessions.delete(userId);
+            }
+        }
+    }
+
+    sendToUser(userId, notification) {
+        const userConnections = this.connections.get(String(userId));
+        if (userConnections && userConnections.size > 0) {
+            userConnections.forEach((ws) => this.sendToConnection(ws, notification));
+            return true;
+        }
+        return false;
+    }
+
+    sendToUsers(userIds, notification) {
+        return [...new Set(userIds.map(String))].reduce((count, userId) => (this.sendToUser(userId, notification) ? count + 1 : count), 0);
+    }
+
+    sendToConnection(ws, notification) {
+        try {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ ...notification, timestamp: notification.timestamp || new Date().toISOString() }));
+            }
+        } catch (error) {
+            logger.error('Error sending WebSocket notification:', error);
+        }
+    }
+
+    /**
+     * Tell users about something the server did.
+     * data.message and data.level ('success', 'info', 'warning', 'error') are shown as a notice;
+     * an event without a message is for pages that listen for it.
+     */
+    notify(userIds, eventType, data = {}) {
+        const recipients = [...new Set([].concat(userIds).filter(Boolean).map(String))];
+        this.keep(recipients, eventType, data);
+        return this.sendToUsers(recipients, { type: eventType, data });
+    }
+
+    /**
+     * Everyone who holds one of the roles, signed in or not.
+     */
+    async notifyRole(roles, eventType, data = {}) {
+        try {
+            const { default: User } = await import('../models/user.model.js');
+            const holders = await User.find({ roles: { $in: [].concat(roles) } }).select('_id');
+            return this.notify(holders.map((holder) => holder.id), eventType, data);
+        } catch (error) {
+            logger.error('Role notification failed:', error);
+            return 0;
+        }
+    }
+
+    /**
+     * Everyone connected now. alsoKeepFor names people who should find it later even if they are away.
+     */
+    broadcast(eventType, data = {}, alsoKeepFor = []) {
+        const connected = [...this.connections.keys()];
+        this.keep([...new Set([...connected, ...[].concat(alsoKeepFor).filter(Boolean).map(String)])], eventType, data);
+        return this.sendToUsers(connected, { type: eventType, data });
+    }
+
+    /**
+     * Notices with a message are kept so they can be read later. Signals without one are not.
+     */
+    async keep(userIds, eventType, data = {}) {
+        if (!data.message || userIds.length === 0) return;
+        try {
+            const { default: Notification } = await import('../models/notification.model.js');
+            await Notification.insertMany(userIds.map((user) => ({
+                user,
+                type: eventType,
+                level: data.level,
+                title: data.title || '',
+                message: String(data.message).slice(0, 500),
+                path: data.path || null
+            })), { ordered: false });
+        } catch (error) {
+            logger.warn('Notification could not be kept', { type: eventType, error: error.message });
+        }
+    }
+
+    shutdown() {
+        this.connections.forEach((sockets) => sockets.forEach((ws) => {
+            try {
+                ws.terminate();
+            } catch {
+                return;
+            }
+        }));
+        this.connections.clear();
+        this.userSessions.clear();
+        logger.info('🔔 Notification service shut down');
+    }
+}
+
+let notificationService = null;
+const getNotificationService = () => {
+    if (!notificationService) notificationService = new NotificationService();
+    return notificationService;
+};
+
 export {
+    getNotificationService,
     setupMiddleware,
     registerRoutes,
     validateRoute,

@@ -8,6 +8,7 @@ import path from 'node:path';
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import http from 'node:http';
+import { WebSocketServer } from 'ws';
 
 // Load environment variables FIRST before importing other local modules
 dotenv.config({path: path.resolve(process.cwd(), '.env')});
@@ -344,6 +345,33 @@ class Server {
             const serverPort = port || this.config.port;
             return new Promise((resolve) => {
                 this.server = this.httpServer.listen(serverPort, async () => {
+                    // WebSocket route table: path prefix -> handler
+                    try {
+                        const notificationService = appMiddleware.getNotificationService();
+                        this.wss = new WebSocketServer({ server: this.httpServer });
+                        const wsRoutes = [
+                            { prefix: '/notifications', handle: (ws, req) => notificationService.handleConnection(ws, req) }
+                        ];
+                        this.wss.on('connection', async (ws, req) => {
+                            try {
+                                const urlPath = new URL(req.url, `http://${req.headers.host}`).pathname;
+                                const route = wsRoutes.find((entry) => urlPath === entry.prefix || urlPath.startsWith(entry.prefix));
+                                if (!route) {
+                                    ws.close(1008, 'Invalid path');
+                                    return;
+                                }
+                                await route.handle(ws, req);
+                            } catch (error) {
+                                logger.error('WebSocket connection failed:', error);
+                                try { ws.close(1008, 'Authentication failed'); } catch { /* already closed */ }
+                            }
+                        });
+                        this.wss.on('error', (error) => logger.error('WebSocket server error:', error));
+                        notificationService.initialize();
+                    } catch (error) {
+                        logger.error('❌ Failed to start notification WebSocket server:', error);
+                    }
+
                     // Start cache cleanup service if caching is enabled and cleanup is enabled
                     if (this.config.cacheEnabled && process.env.CACHE_CLEANUP_ENABLED === 'true') {
                         try {
@@ -393,6 +421,14 @@ class Server {
             }
 
             logger.info('Stopping server...');
+
+            try {
+                appMiddleware.getNotificationService().shutdown();
+                this.wss?.close();
+                this.wss = null;
+            } catch (error) {
+                logger.warn('Error shutting down notification WebSocket service:', error.message);
+            }
 
             this.server.close(async (err) => {
                 if (err) {

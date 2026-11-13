@@ -4,7 +4,7 @@ import * as authMiddleware from '../middleware/auth.middleware.js';
 import { RIGHTS } from '../config/rights.js';
 import { noCacheResponse } from '../middleware/cache.middleware.js';
 import { validateRequest } from '../middleware/validation.middleware.js';
-import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas } from '../models/ai.model.js';
+import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas } from '../models/ai.model.js';
 
 const router = Router();
 
@@ -39,6 +39,9 @@ router.validRoutes = [
     '/api/v1/chats/:id/attachments/:attachmentId',
     '/api/v1/chats/:id/export',
     '/api/v1/prompts',
+    '/api/v1/guide',
+    '/api/v1/activity',
+    '/api/v1/guide/seen',
     '/api/v1/prompts/:id',
     '/api/v1/files/browse',
     '/api/v1/files/text',
@@ -97,6 +100,10 @@ router.get('/chats/:id/export', ...signedIn, withChatId, validateRequest(chatSch
 
 const withPromptId = validateRequest(promptSchemas.promptId, 'params');
 
+router.get('/activity', ...signedIn, aiController.getActivity);
+router.get('/guide', ...signedIn, aiController.getGuide);
+router.put('/guide', ...signedIn, validateRequest(guideSchemas.update), aiController.updateGuide);
+router.post('/guide/seen', ...signedIn, validateRequest(guideSchemas.seen), aiController.markGuideSeen);
 router.get('/prompts', ...signedIn, aiController.listPrompts);
 router.post('/prompts', ...signedIn, validateRequest(promptSchemas.create), aiController.createPrompt);
 router.patch('/prompts/:id', ...signedIn, withPromptId, validateRequest(promptSchemas.update), aiController.updatePrompt);

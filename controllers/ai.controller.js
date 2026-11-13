@@ -5,9 +5,9 @@ import { EventEmitter } from 'node:events';
 import express from 'express';
 import mongoose from 'mongoose';
 import logger from '../utils/app.logger.js';
-import { asyncHandler } from '../middleware/app.middleware.js';
+import { asyncHandler, getNotificationService } from '../middleware/app.middleware.js';
 import { hasRight, RIGHTS } from '../config/rights.js';
-import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, chatSchemas } from '../models/ai.model.js';
+import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, createOllamaClient, detectHardware, readDisk, rankCatalogue, fitModel,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
@@ -192,6 +192,7 @@ class DownloadManager extends EventEmitter {
         await this.clearFailed(model, doc.id);
 
         this.announce(doc);
+        getNotificationService().broadcast('activity:changed');
         this.next();
         return this.present(doc);
     }
@@ -241,6 +242,7 @@ class DownloadManager extends EventEmitter {
         doc.errorCode = null;
         await this.save(doc, { status: 'downloading', startedAt: doc.startedAt, errorCode: null });
         this.announce(doc);
+        getNotificationService().broadcast('activity:changed');
 
         const watchdog = setInterval(() => {
             const waitingForBytes = state.totalBytes === 0 || state.completedBytes < state.totalBytes;
@@ -352,6 +354,12 @@ class DownloadManager extends EventEmitter {
         this.announce(doc);
         if (outcome === 'completed') await this.clearFailed(doc.model, doc.id);
         this.active = null;
+        if (outcome === 'completed') {
+            getNotificationService().broadcast('download:finished', { level: 'success', message: `${doc.model} has finished downloading.`, model: doc.model, id: doc.id }, [doc.requestedBy]);
+        } else if (outcome === 'failed') {
+            getNotificationService().notify(doc.requestedBy, 'download:failed', { level: 'error', message: `${doc.model} could not be downloaded. ${new OllamaError(errorCode).message}`, model: doc.model, id: doc.id });
+        }
+        getNotificationService().broadcast('activity:changed');
         this.emit('settled', this.present(doc));
         this.next();
     }
@@ -381,6 +389,7 @@ class DownloadManager extends EventEmitter {
         doc.finishedAt = outcome === 'cancelled' ? new Date() : null;
         await doc.save();
         this.announce(doc);
+        getNotificationService().broadcast('activity:changed');
         return this.present(doc);
     }
 
@@ -1801,6 +1810,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
 
     const last = chat.messages[chat.messages.length - 1];
     const message = last?.role === 'assistant' ? presentMessage(chat, last, chat.messages.length - 1) : null;
+    if (reply.content && !reply.stopped && !reply.errorCode) {
+        getNotificationService().notify(userId, 'reply:finished', { level: 'info', title: 'Reply ready', message: `The reply in "${chat.title}" is ready.`, chatId: chat.id, path: `/chat/${chat.id}` });
+    }
     write({
         type: reply.errorCode ? 'error' : 'done',
         ...(reply.errorCode ? new OllamaError(reply.errorCode).toJSON() : {}),
@@ -1820,6 +1832,7 @@ const takeTurns = async (chat, body, userId, res) => {
     const id = chat.id;
     busyChats.add(id);
     let turn = { chat, body, res, live: openLive(id) };
+    getNotificationService().notify(userId, 'activity:changed');
     try {
         while (turn) {
             try {
@@ -1841,6 +1854,7 @@ const takeTurns = async (chat, body, userId, res) => {
         liveReplies.delete(id);
         queuedTurns.delete(id);
         busyChats.delete(id);
+        getNotificationService().notify(userId, 'activity:changed');
     }
 };
 
@@ -1856,6 +1870,23 @@ export const sendMessage = asyncHandler(async (req, res) => {
     waiting.push(req.body.content);
     queuedTurns.set(chat.id, waiting);
     res.status(202).json({ success: true, queued: [...waiting] });
+});
+
+const RECENT_DOWNLOAD_MS = 2 * 60 * 1000;
+
+export const getActivity = asyncHandler(async (req, res) => {
+    const ids = [...liveReplies.keys()];
+    const chats = ids.length > 0
+        ? await Chat.find({ _id: { $in: ids }, service: SERVICE, owner: req.user.id }).select('title model')
+        : [];
+    const jobs = (await downloads.list()).filter((job) => ['queued', 'downloading'].includes(job.status)
+        || (['completed', 'failed'].includes(job.status) && job.finishedAt && Date.now() - new Date(job.finishedAt).getTime() < RECENT_DOWNLOAD_MS));
+    res.status(200).json({
+        success: true,
+        replies: chats.map((chat) => ({ chatId: chat.id, title: chat.title, model: chat.model, waiting: (queuedTurns.get(chat.id) || []).length })),
+        downloads: jobs.map((job) => ({ id: job.id, model: job.model, status: job.status, percent: job.percent })),
+        permissions: { manage: canManage(req) }
+    });
 });
 
 export const rejoinReply = asyncHandler(async (req, res) => {
@@ -2075,6 +2106,36 @@ export const exportChat = asyncHandler(async (req, res) => {
 
 const presentPrompt = (prompt) => ({
     id: prompt.id, name: prompt.name, text: prompt.text, source: prompt.source, path: prompt.path, updatedAt: prompt.updatedAt
+});
+
+const guideFor = async (req) => Guide.findOneAndUpdate(
+    { service: SERVICE, user: req.user.id },
+    { $setOnInsert: { on: true, seen: [] } },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+);
+const guideSteps = (req) => (canManage(req) ? GUIDE_STEPS : GUIDE_STEPS.filter((step) => !MANAGER_GUIDE_STEPS.includes(step)));
+const presentGuide = (req, guide) => ({ on: guide.on, seen: guide.seen, steps: guideSteps(req) });
+
+export const getGuide = asyncHandler(async (req, res) => {
+    res.status(200).json({ success: true, guide: presentGuide(req, await guideFor(req)) });
+});
+
+export const updateGuide = asyncHandler(async (req, res) => {
+    const guide = await guideFor(req);
+    guide.on = req.body.on;
+    if (req.body.on) guide.seen = [];
+    await guide.save();
+    res.status(200).json({ success: true, guide: presentGuide(req, guide) });
+});
+
+export const markGuideSeen = asyncHandler(async (req, res) => {
+    const guide = await guideFor(req);
+    if (guide.on && !guide.seen.includes(req.body.key)) {
+        guide.seen.push(req.body.key);
+        if (guideSteps(req).every((step) => guide.seen.includes(step))) guide.on = false;
+        await guide.save();
+    }
+    res.status(200).json({ success: true, guide: presentGuide(req, guide) });
 });
 
 export const listPrompts = asyncHandler(async (req, res) => {

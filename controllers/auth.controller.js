@@ -7,7 +7,7 @@ import {
     addOrUpdateDevice,
     getDeviceSummary
 } from '../middleware/user.middleware.js';
-import {asyncHandler} from '../middleware/app.middleware.js';
+import {asyncHandler, getNotificationService} from '../middleware/app.middleware.js';
 import {AppError} from '../middleware/error.middleware.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
@@ -1493,6 +1493,13 @@ const authController = {
         // Use sophisticated cache invalidation for role changes
         await cache.invalidateAllRelatedCaches('user', userId, userId);
 
+        getNotificationService().notify(userId, 'role:approved', {
+            level: 'success',
+            title: 'Role request approved',
+            message: `You now have these roles: ${user.roles.join(', ')}.`,
+            roles: user.roles
+        });
+
         logger.info('[Auth Controller - Role Approval] Role request approved successfully:', {
             userId,
             approvedBy: approverUserId,
@@ -1550,6 +1557,12 @@ const authController = {
 
         // Use sophisticated cache invalidation for role changes
         await cache.invalidateAllRelatedCaches('user', userId, userId);
+
+        getNotificationService().notify(userId, 'role:rejected', {
+            level: 'warning',
+            title: 'Role request turned down',
+            message: reason ? `Your role request was turned down: ${reason}` : 'Your role request was turned down.'
+        });
 
         logger.info('[Auth Controller - Role Rejection] Role request rejected successfully:', {
             userId,
@@ -1634,6 +1647,14 @@ const authController = {
 
         // Use sophisticated cache invalidation for role elevation request
         await cache.invalidateAllRelatedCaches('user', requesterId, requesterId);
+
+        getNotificationService().notifyRole('OWNER', 'role:requested', {
+            level: 'info',
+            title: 'Role request',
+            message: `${user.username || user.email} asked for: ${newRoles.join(', ')}.`,
+            userId: String(requesterId),
+            roles: newRoles
+        });
 
         logger.info('[Auth Controller - Role Elevation] Role elevation request submitted successfully:', {
             requesterId,
