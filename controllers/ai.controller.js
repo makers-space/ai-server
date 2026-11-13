@@ -9,7 +9,7 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, createOllamaClient, detectHardware, readDisk, rankCatalogue, fitModel,
+    OllamaError, mapOllamaError, createOllamaClient, detectHardware, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage
 } from '../middleware/ai.middleware.js';
@@ -899,6 +899,8 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         hardware: hasSpecs ? hardware : null,
+        reserved: { gpuMemoryMb: GPU_HEADROOM_MB, memoryMb: RAM_RESERVE_MB },
+        notes: hasSpecs ? fitNotes(catalogue, hardware) : [],
         models: hasSpecs ? rankCatalogue(catalogue, hardware) : catalogue.map((entry) => ({ ...entry, fit: null, pick: null }))
     });
 });
