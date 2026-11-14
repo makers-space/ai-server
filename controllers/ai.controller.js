@@ -54,7 +54,8 @@ const deviceScope = new AsyncLocalStorage();
 const LOCAL_TARGET = { kind: 'local', id: null };
 const NO_TARGET = { kind: 'none', id: null };
 const DEVICE_HOST = 'http://device.mollama';
-const localEnabled = () => process.env.LOCAL_DEVICE !== 'false';
+// A hosted server has no Ollama of its own, so in production its computer is not a device unless asked for.
+const localEnabled = () => (process.env.LOCAL_DEVICE ? process.env.LOCAL_DEVICE === 'true' : process.env.NODE_ENV !== 'production');
 const currentTarget = () => deviceScope.getStore() || (localEnabled() ? LOCAL_TARGET : NO_TARGET);
 const targetOf = (device) => (device.kind === 'companion' ? { kind: 'companion', id: String(device.id) } : LOCAL_TARGET);
 
