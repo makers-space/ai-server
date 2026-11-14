@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { statfs } from 'node:fs/promises';
+import { statfs, readFile, readdir } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import dns from 'node:dns/promises';
 import https from 'node:https';
@@ -430,6 +430,17 @@ export const deviceGateway = new DeviceGateway();
 
 const MB = 1024 * 1024;
 
+// Graphics a model can run on, checked a different way on each kind of machine:
+// Nvidia cards anywhere, the built-in graphics of an Apple-chip Mac, and AMD cards on Windows and Linux.
+// Anything else reports no usable graphics, so models are sized for the processor and system memory.
+const APPLE_GRAPHICS_SHARE = 2 / 3;
+const SMALLEST_USEFUL_CARD_MB = 2048;
+const DISPLAY_ADAPTERS = "Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue | Select-Object DriverDesc, 'HardwareInformation.qwMemorySize' | ConvertTo-Json -Compress";
+
+const runQuietly = (file, args) => new Promise((resolve) => {
+    execFile(file, args, { timeout: 8000, windowsHide: true }, (error, stdout) => resolve(error ? '' : String(stdout)));
+});
+
 export const parseNvidiaSmi = (text) =>
     String(text || '')
         .split(/\r?\n/)
@@ -443,15 +454,51 @@ export const parseNvidiaSmi = (text) =>
         })
         .filter(Boolean);
 
-const readNvidiaSmi = () =>
-    new Promise((resolve) => {
-        execFile(
-            'nvidia-smi',
-            ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits'],
-            { timeout: 5000, windowsHide: true },
-            (error, stdout) => resolve(error ? '' : stdout)
-        );
-    });
+// An Apple chip's graphics share the system memory; about two thirds of it can hold a model.
+export const appleGpus = ({ platform, arch, cpu, memoryMb }) => (platform === 'darwin' && arch === 'arm64' && memoryMb > 0
+    ? [{ name: `${cpu || 'Apple chip'} built-in graphics`, memoryMb: Math.round(memoryMb * APPLE_GRAPHICS_SHARE) }]
+    : []);
+
+// Windows lists every display adapter with its own memory; only AMD cards with real memory of their own count here.
+export const parseDisplayAdapters = (text) => {
+    let rows = [];
+    try {
+        rows = JSON.parse(String(text || '').trim() || '[]');
+    } catch {
+        return [];
+    }
+    return (Array.isArray(rows) ? rows : [rows]).map((row) => {
+        const name = String(row?.DriverDesc || '').trim();
+        const memoryMb = Math.round(Number(row?.['HardwareInformation.qwMemorySize'] || 0) / MB);
+        return /radeon|\bamd\b/i.test(name) && memoryMb >= SMALLEST_USEFUL_CARD_MB ? { name, memoryMb } : null;
+    }).filter(Boolean);
+};
+
+const readLinuxAmd = async () => {
+    const found = [];
+    for (const card of await readdir('/sys/class/drm').catch(() => [])) {
+        if (!/^card\d+$/.test(card)) continue;
+        const device = `/sys/class/drm/${card}/device`;
+        const vendor = (await readFile(`${device}/vendor`, 'utf8').catch(() => '')).trim();
+        const bytes = Number((await readFile(`${device}/mem_info_vram_total`, 'utf8').catch(() => '0')).trim());
+        if (vendor === '0x1002' && bytes >= SMALLEST_USEFUL_CARD_MB * MB) found.push({ name: 'AMD Radeon graphics card', memoryMb: Math.round(bytes / MB) });
+    }
+    return found;
+};
+
+const readGpus = async () => {
+    try {
+        const nvidia = parseNvidiaSmi(await runQuietly('nvidia-smi', ['--query-gpu=name,memory.total', '--format=csv,noheader,nounits']));
+        if (nvidia.length) return nvidia;
+        const apple = appleGpus({ platform: process.platform, arch: process.arch, cpu: os.cpus()[0]?.model?.trim(), memoryMb: Math.round(os.totalmem() / MB) });
+        if (apple.length) return apple;
+        if (process.platform === 'win32') return parseDisplayAdapters(await runQuietly('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', DISPLAY_ADAPTERS]));
+        if (process.platform === 'linux') return await readLinuxAmd();
+        return [];
+    } catch {
+        return [];
+    }
+};
 
 export const modelsFolder = () => process.env.OLLAMA_MODELS || path.join(os.homedir(), '.ollama', 'models');
 
@@ -471,7 +518,7 @@ export const readDisk = async () => {
 };
 
 export const detectHardware = async () => {
-    const [gpus, disk] = await Promise.all([readNvidiaSmi().then(parseNvidiaSmi), readDisk()]);
+    const [gpus, disk] = await Promise.all([readGpus(), readDisk()]);
     const cpus = os.cpus();
 
     return {

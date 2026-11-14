@@ -490,7 +490,7 @@ const setupCors = (app) => {
         },
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token', 'x-csrf-token', 'Accept', 'Origin'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token', 'x-csrf-token', 'Accept', 'Origin', 'X-Mollama-Device'],
         exposedHeaders: ['Set-Cookie'],
         optionsSuccessStatus: 200, // For legacy browser support
         preflightContinue: false, // Pass control to next handler after preflight
