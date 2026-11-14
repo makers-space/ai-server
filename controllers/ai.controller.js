@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import express from 'express';
@@ -11,7 +13,7 @@ import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide,
 import {
     OllamaError, mapOllamaError, createOllamaClient, detectHardware, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
-    searchReady, searchWeb, readPage
+    searchReady, searchWeb, readPage, deviceGateway
 } from '../middleware/ai.middleware.js';
 
 const MB = 1024 * 1024;
@@ -47,7 +49,29 @@ const resolveOllamaHost = async () => {
     return settings.ollamaBaseUrl || process.env.OLLAMA_BASE_URL;
 };
 
-const getOllama = async () => createOllamaClient(await resolveOllamaHost());
+// Which device a request works on: the server's own computer, one of the person's linked computers, or none.
+const deviceScope = new AsyncLocalStorage();
+const LOCAL_TARGET = { kind: 'local', id: null };
+const NO_TARGET = { kind: 'none', id: null };
+const DEVICE_HOST = 'http://device.mollama';
+const localEnabled = () => process.env.LOCAL_DEVICE !== 'false';
+const currentTarget = () => deviceScope.getStore() || (localEnabled() ? LOCAL_TARGET : NO_TARGET);
+const targetOf = (device) => (device.kind === 'companion' ? { kind: 'companion', id: String(device.id) } : LOCAL_TARGET);
+
+const getOllama = async () => {
+    const target = currentTarget();
+    if (target.kind === 'companion') return createOllamaClient(DEVICE_HOST, deviceGateway.fetcher(target.id));
+    if (target.kind === 'none') return createOllamaClient(DEVICE_HOST, () => Promise.reject(new OllamaError('NO_DEVICE')));
+    return createOllamaClient(await resolveOllamaHost());
+};
+
+const diskNow = async () => {
+    const target = currentTarget();
+    if (target.kind === 'local') return readDisk();
+    const unknown = { diskFreeMb: null, diskTotalMb: null };
+    if (target.kind === 'none') return unknown;
+    return deviceGateway.ask(target.id, 'disk').then((disk) => ({ ...unknown, ...disk }), () => unknown);
+};
 
 const SAVE_EVERY_MS = 2000;
 const EMIT_EVERY_MS = 400;
@@ -80,7 +104,7 @@ class DownloadManager extends EventEmitter {
     constructor() {
         super();
         this.setMaxListeners(100);
-        this.diskProbe = readDisk;
+        this.diskProbe = diskNow;
         this.active = null;
         this.live = new Map();
         this.stallWarnMs = 20000;
@@ -90,7 +114,7 @@ class DownloadManager extends EventEmitter {
     }
 
     setDiskProbe(probe) {
-        this.diskProbe = probe || readDisk;
+        this.diskProbe = probe || diskNow;
     }
 
     async freeMb() {
@@ -184,11 +208,11 @@ class DownloadManager extends EventEmitter {
             doc = await Download.findOne({ service: SERVICE, model, status: 'failed' }).sort({ createdAt: -1 });
             if (doc) {
                 this.live.delete(doc.id);
-                Object.assign(doc, { status: 'queued', errorCode: null, finishedAt: null, requestedBy: userId });
+                Object.assign(doc, { status: 'queued', errorCode: null, finishedAt: null, requestedBy: userId, device: currentTarget().id });
                 await doc.save();
             }
         }
-        if (!doc) doc = await Download.create({ model, requestedBy: userId });
+        if (!doc) doc = await Download.create({ model, requestedBy: userId, device: currentTarget().id });
         await this.clearFailed(model, doc.id);
 
         this.announce(doc);
@@ -208,7 +232,8 @@ class DownloadManager extends EventEmitter {
         }
         if (!doc || this.active) return;
         this.active = { id: doc.id, stream: null, stopAs: null, stalledOut: false };
-        this.run(doc).catch((error) => {
+        const target = doc.device ? { kind: 'companion', id: String(doc.device) } : localEnabled() ? LOCAL_TARGET : NO_TARGET;
+        deviceScope.run(target, () => this.run(doc)).catch((error) => {
             logger.error('[Downloads] Unexpected failure', { error: error.message });
             if (this.active?.id === doc.id) this.active = null;
             this.next();
@@ -262,7 +287,7 @@ class DownloadManager extends EventEmitter {
         const freeAtStartMb = await this.freeMb();
         let hardware = null;
         try {
-            hardware = effectiveHardware(await getLocalDevice());
+            hardware = effectiveHardware(await getCurrentDevice());
         } catch {
             hardware = null;
         }
@@ -462,9 +487,16 @@ const getLocalDevice = async ({ redetect = false } = {}) => {
     return device;
 };
 
+const getCurrentDevice = async () => {
+    const target = currentTarget();
+    if (target.kind === 'companion') return Device.findOne({ _id: target.id, service: SERVICE });
+    if (target.kind === 'none') return null;
+    return getLocalDevice();
+};
+
 const effectiveHardware = (device) => {
-    const detected = device.hardware?.toObject?.() || device.hardware || {};
-    const overrides = device.overrides || {};
+    const detected = device?.hardware?.toObject?.() || device?.hardware || {};
+    const overrides = device?.overrides || {};
     const gpuName = overrides.gpuName || detected.gpus?.[0]?.name || null;
     const gpuMemoryMb = overrides.gpuMemoryMb ?? detected.gpuMemoryMb ?? 0;
 
@@ -481,8 +513,7 @@ const effectiveHardware = (device) => {
     };
 };
 
-const readOllama = async (host) => {
-    const client = createOllamaClient(host);
+const readOllama = async (client) => {
     const status = await client.status();
     if (!status.available) return { ...status, modelCount: 0 };
     try {
@@ -493,12 +524,42 @@ const readOllama = async (host) => {
     }
 };
 
+const UNREACHED = { available: false, version: null, modelCount: 0 };
+const isOnline = (device) => device.kind === 'local' || deviceGateway.isOnline(device.id);
+const ollamaOf = (device) => (isOnline(device) ? deviceScope.run(targetOf(device), async () => readOllama(await getOllama())) : UNREACHED);
+const hashKey = (key) => crypto.createHash('sha256').update(String(key)).digest('hex');
+
+const ownDevices = (userId) => Device.find({ service: SERVICE, kind: 'companion', registeredBy: userId }).sort({ lastSeenAt: -1 });
+
+const allowedDevice = async (req, id) => {
+    const device = await Device.findOne({ _id: id, service: SERVICE });
+    if (!device) return null;
+    if (device.kind === 'local') return localEnabled() && device.hostname === os.hostname() ? device : null;
+    return String(device.registeredBy) === String(req.user.id) ? device : null;
+};
+
+const pickTarget = async (userId, wanted) => {
+    if (wanted && mongoose.isValidObjectId(wanted)) {
+        const device = await Device.findOne({ _id: wanted, service: SERVICE });
+        if (device?.kind === 'companion' && String(device.registeredBy) === String(userId)) return targetOf(device);
+        if (device?.kind === 'local' && localEnabled()) return LOCAL_TARGET;
+    }
+    if (localEnabled()) return LOCAL_TARGET;
+    const own = await ownDevices(userId);
+    const best = own.find((device) => deviceGateway.isOnline(device.id)) || own[0];
+    return best ? targetOf(best) : NO_TARGET;
+};
+
+export const useDevice = (req, res, next) => {
+    pickTarget(req.user.id, req.get('X-Mollama-Device') || req.query?.device).then((target) => deviceScope.run(target, next), next);
+};
+
 const presentDevice = (device, ollama) => ({
     id: device.id,
     name: device.name,
     kind: device.kind,
     service: device.service,
-    online: true,
+    online: isOnline(device),
     lastSeenAt: device.lastSeenAt,
     hardware: effectiveHardware(device),
     detected: device.hardware,
@@ -509,28 +570,29 @@ const presentDevice = (device, ollama) => ({
 
 
 export const listDevices = asyncHandler(async (req, res) => {
-    const device = await getLocalDevice();
-    const ollama = await readOllama(await resolveOllamaHost());
+    const local = localEnabled() ? await getLocalDevice() : null;
+    const devices = [...(local ? [local] : []), ...await ownDevices(req.user.id)];
+    const target = currentTarget();
 
     res.status(200).json({
         success: true,
-        devices: [presentDevice(device, ollama)],
+        devices: await Promise.all(devices.map(async (device) => presentDevice(device, await ollamaOf(device)))),
+        current: target.kind === 'companion' ? target.id : local?.id ?? null,
         permissions: { manage: canManage(req) }
     });
 });
 
 export const getDevice = asyncHandler(async (req, res) => {
-    const local = await getLocalDevice();
-    if (local.id !== req.params.id) {
+    const device = await allowedDevice(req, req.params.id);
+    if (!device) {
         return res.status(404).json({ success: false, message: 'Device not found' });
     }
-    const ollama = await readOllama(await resolveOllamaHost());
-    res.status(200).json({ success: true, device: presentDevice(local, ollama), permissions: { manage: canManage(req) } });
+    res.status(200).json({ success: true, device: presentDevice(device, await ollamaOf(device)), permissions: { manage: canManage(req) } });
 });
 
 export const updateDevice = asyncHandler(async (req, res) => {
-    const device = await getLocalDevice();
-    if (device.id !== req.params.id) {
+    const device = await allowedDevice(req, req.params.id);
+    if (!device) {
         return res.status(404).json({ success: false, message: 'Device not found' });
     }
 
@@ -544,19 +606,82 @@ export const updateDevice = asyncHandler(async (req, res) => {
     await device.save();
     logger.info('[Device] Device updated', { deviceId: device.id, userId: req.user.id });
 
-    const ollama = await readOllama(await resolveOllamaHost());
-    res.status(200).json({ success: true, device: presentDevice(device, ollama) });
+    res.status(200).json({ success: true, device: presentDevice(device, await ollamaOf(device)) });
 });
 
 export const detectDevice = asyncHandler(async (req, res) => {
-    const current = await getLocalDevice();
-    if (current.id !== req.params.id) {
+    const found = await allowedDevice(req, req.params.id);
+    if (!found) {
         return res.status(404).json({ success: false, message: 'Device not found' });
     }
-    const device = await getLocalDevice({ redetect: true });
-    const ollama = await readOllama(await resolveOllamaHost());
-    res.status(200).json({ success: true, device: presentDevice(device, ollama) });
+    let device = found;
+    if (found.kind === 'local') {
+        device = await getLocalDevice({ redetect: true });
+    } else {
+        try {
+            found.hardware = await deviceGateway.ask(found.id, 'hardware');
+            await found.save();
+        } catch (error) {
+            return sendOllamaError(res, error);
+        }
+    }
+    res.status(200).json({ success: true, device: presentDevice(device, await ollamaOf(device)) });
 });
+
+export const linkDevice = asyncHandler(async (req, res) => {
+    const { hostname, name, hardware } = req.body;
+    const key = crypto.randomBytes(32).toString('hex');
+    const device = await Device.findOneAndUpdate(
+        { service: SERVICE, kind: 'companion', hostname: `${req.user.id}:${hostname}` },
+        {
+            $set: { keyHash: hashKey(key), registeredBy: req.user.id, lastSeenAt: new Date(), ...(hardware ? { hardware } : {}) },
+            $setOnInsert: { name: name || hostname }
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+    deviceGateway.disconnect(device.id);
+    logger.info('[Device] Device linked', { deviceId: device.id, userId: req.user.id });
+
+    res.status(201).json({ success: true, device: { id: device.id, name: device.name }, key });
+});
+
+export const unlinkDevice = asyncHandler(async (req, res) => {
+    const device = await allowedDevice(req, req.params.id);
+    if (!device || device.kind !== 'companion') {
+        return res.status(404).json({ success: false, message: 'Device not found' });
+    }
+    await Device.deleteOne({ _id: device._id });
+    deviceGateway.disconnect(device.id);
+    getNotificationService().sendToUser(String(req.user.id), { type: 'device:changed', data: { deviceId: device.id, online: false } });
+    logger.info('[Device] Device removed', { deviceId: device.id, userId: req.user.id });
+
+    res.status(200).json({ success: true });
+});
+
+export const connectDevice = (ws) => deviceGateway.handleConnection(ws, async (hello) => {
+    if (!mongoose.isValidObjectId(hello.deviceId) || typeof hello.key !== 'string') return null;
+    const device = await Device.findOne({ _id: hello.deviceId, service: SERVICE, kind: 'companion' }).select('+keyHash');
+    if (!device?.keyHash) return null;
+    const given = Buffer.from(hashKey(hello.key));
+    const kept = Buffer.from(device.keyHash);
+    if (given.length !== kept.length || !crypto.timingSafeEqual(given, kept)) return null;
+    device.lastSeenAt = new Date();
+    await device.save();
+    return device.id;
+});
+
+const announceDevice = (online) => async (deviceId) => {
+    try {
+        const device = await Device.findOne({ _id: deviceId, service: SERVICE });
+        if (!device?.registeredBy) return;
+        if (!online) await Device.updateOne({ _id: deviceId }, { lastSeenAt: new Date() });
+        getNotificationService().sendToUser(String(device.registeredBy), { type: 'device:changed', data: { deviceId: String(deviceId), online } });
+    } catch (error) {
+        logger.warn('[Device] Could not announce a device change', { deviceId, error: error.message });
+    }
+};
+deviceGateway.on('online', announceDevice(true));
+deviceGateway.on('offline', announceDevice(false));
 
 export const readSettings = asyncHandler(async (req, res) => {
     const settings = await getSettings();
@@ -587,19 +712,21 @@ export const testConnection = asyncHandler(async (req, res) => {
 });
 
 export const getSetupStatus = asyncHandler(async (req, res) => {
-    const host = await resolveOllamaHost();
-    const ollama = await readOllama(host);
-    const device = await getLocalDevice();
+    const target = currentTarget();
+    const device = await getCurrentDevice();
+    const reachable = Boolean(device) && isOnline(device);
+    const ollama = reachable ? await readOllama(await getOllama()) : UNREACHED;
+    const problem = !device ? 'NO_DEVICE' : !reachable ? 'DEVICE_OFFLINE' : 'OLLAMA_DOWN';
 
     res.status(200).json({
         success: true,
         ollama: ollama.available
             ? ollama
-            : { ...ollama, ...new OllamaError('OLLAMA_DOWN').toJSON() },
-        device: { id: device.id, name: device.name, detected: Boolean(device.hardware) },
+            : { ...ollama, ...new OllamaError(problem).toJSON() },
+        device: device ? { id: device.id, name: device.name, kind: target.kind, detected: Boolean(device.hardware) } : null,
         steps: {
             ollama: ollama.available,
-            device: Boolean(device.hardware),
+            device: Boolean(device?.hardware),
             model: ollama.modelCount > 0
         }
     });
@@ -642,7 +769,7 @@ const describeInstalled = async (ollama, model, personalByName) => {
 export const listModels = asyncHandler(async (req, res) => {
     const ollama = await getOllama();
     const status = await ollama.status();
-    const disk = await readDisk();
+    const disk = await diskNow();
 
     if (!status.available) {
         return res.status(200).json({
@@ -660,7 +787,7 @@ export const listModels = asyncHandler(async (req, res) => {
     const personalByName = new Map(personal.map((entry) => [entry.name, entry]));
 
     const models = await Promise.all(installed.map((model) => describeInstalled(ollama, model, personalByName)));
-    const hardware = effectiveHardware(await getLocalDevice());
+    const hardware = effectiveHardware(await getCurrentDevice());
     let loaded = new Set();
     try {
         loaded = new Set((await ollama.running()).models.map((model) => model.name));
@@ -828,7 +955,7 @@ export const startDownload = asyncHandler(async (req, res) => {
     const known = catalogueByTag.get(req.body.name);
     try {
         if (known) {
-            const hardware = effectiveHardware(await getLocalDevice());
+            const hardware = effectiveHardware(await getCurrentDevice());
             const fit = fitModel(known, hardware);
             if (!fit.fits) {
                 const error = new OllamaError('MODEL_TOO_LARGE');
@@ -906,13 +1033,14 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
 });
 
 export const getDeviceCatalogue = asyncHandler(async (req, res) => {
-    const device = await getLocalDevice();
-    if (device.id !== req.params.id) {
+    const device = await allowedDevice(req, req.params.id);
+    if (!device) {
         return res.status(404).json({ success: false, message: 'Device not found' });
     }
+    deviceScope.enterWith(targetOf(device));
     const hardware = effectiveHardware(device);
     const installed = await installedNames();
-    const disk = await readDisk();
+    const disk = await diskNow();
 
     res.status(200).json({
         success: true,
@@ -1198,7 +1326,7 @@ const chooseModel = async (ollama, userId) => {
     const recent = await Chat.findOne({ service: SERVICE, owner: userId, model: { $ne: null } }).sort({ updatedAt: -1 }).select('model');
     if (recent && names.has(recent.model)) return recent.model;
 
-    const hardware = effectiveHardware(await getLocalDevice());
+    const hardware = effectiveHardware(await getCurrentDevice());
     const usable = models.filter((model) => !/embed/i.test(model.name));
     const sized = (usable.length > 0 ? usable : models)
         .map((model) => ({ name: model.name, size: model.size || 0, fit: fitModel({ sizeMb: (model.size || 0) / MB, parameters: 0 }, hardware) }))

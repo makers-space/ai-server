@@ -350,7 +350,8 @@ class Server {
                         const notificationService = appMiddleware.getNotificationService();
                         this.wss = new WebSocketServer({ server: this.httpServer });
                         const wsRoutes = [
-                            { prefix: '/notifications', handle: (ws, req) => notificationService.handleConnection(ws, req) }
+                            { prefix: '/notifications', handle: (ws, req) => notificationService.handleConnection(ws, req) },
+                            { prefix: '/devices', handle: async (ws) => (await import('./controllers/ai.controller.js')).connectDevice(ws) }
                         ];
                         this.wss.on('connection', async (ws, req) => {
                             try {

@@ -34,6 +34,7 @@ const deviceSchema = new mongoose.Schema({
     kind: { type: String, enum: ['local', 'companion'], required: true },
     hostname: { type: String, required: true },
     registeredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    keyHash: { type: String, default: null, select: false },
     hardware: { type: hardwareSchema, default: null },
     overrides: { type: overridesSchema, default: () => ({}) },
     lastSeenAt: { type: Date, default: Date.now }
@@ -78,6 +79,7 @@ const downloadSchema = new mongoose.Schema({
     totalBytes: { type: Number, default: 0 },
     errorCode: { type: String, default: null },
     requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    device: { type: mongoose.Schema.Types.ObjectId, ref: 'Device', default: null },
     startedAt: { type: Date, default: null },
     finishedAt: { type: Date, default: null }
 }, { timestamps: true });
@@ -90,6 +92,27 @@ const ollamaUrl = Joi.string().uri({ scheme: ['http', 'https'] }).max(300);
 export const deviceSchemas = {
     deviceId: Joi.object({
         id: Joi.objectId().required()
+    }),
+
+    link: Joi.object({
+        hostname: Joi.string().trim().min(1).max(120).required(),
+        name: Joi.string().trim().min(1).max(80),
+        hardware: Joi.object({
+            hostname: Joi.string().max(120),
+            platform: Joi.string().max(40),
+            cpu: Joi.string().max(200).allow(null, ''),
+            cpuThreads: Joi.number().integer().min(1).max(4096).allow(null),
+            memoryMb: Joi.number().integer().min(0).max(16777216).allow(null),
+            gpus: Joi.array().max(16).items(Joi.object({
+                name: Joi.string().max(200).required(),
+                memoryMb: Joi.number().integer().min(1).max(4194304).required()
+            })),
+            gpuMemoryMb: Joi.number().integer().min(0).max(4194304).allow(null),
+            diskFreeMb: Joi.number().integer().min(0).allow(null),
+            diskTotalMb: Joi.number().integer().min(0).allow(null),
+            modelsPath: Joi.string().max(500).allow(null, ''),
+            detectedAt: Joi.date()
+        })
     }),
 
     updateDevice: Joi.object({

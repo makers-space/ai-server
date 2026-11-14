@@ -12,6 +12,7 @@ router.validRoutes = [
     '/api/v1/devices',
     '/api/v1/devices/:id',
     '/api/v1/devices/:id/detect',
+    '/api/v1/devices/link',
     '/api/v1/settings',
     '/api/v1/settings/test-connection',
     '/api/v1/setup/status',
@@ -49,11 +50,13 @@ router.validRoutes = [
     '/api/v1/files/remote'
 ];
 
-const signedIn = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.USE_MODELS), noCacheResponse()];
-const manager = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.MANAGE_MODELS), noCacheResponse()];
+const signedIn = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.USE_MODELS), noCacheResponse(), aiController.useDevice];
+const manager = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.MANAGE_MODELS), noCacheResponse(), aiController.useDevice];
 const withDeviceId = validateRequest(deviceSchemas.deviceId, 'params');
 
 router.get('/devices', ...signedIn, aiController.listDevices);
+router.post('/devices/link', ...signedIn, validateRequest(deviceSchemas.link), aiController.linkDevice);
+router.delete('/devices/:id', ...signedIn, withDeviceId, aiController.unlinkDevice);
 router.get('/devices/:id', ...signedIn, withDeviceId, aiController.getDevice);
 router.put('/devices/:id', ...manager, withDeviceId, validateRequest(deviceSchemas.updateDevice), aiController.updateDevice);
 router.post('/devices/:id/detect', ...manager, withDeviceId, aiController.detectDevice);

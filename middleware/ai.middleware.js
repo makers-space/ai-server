@@ -139,6 +139,16 @@ const ERROR_TABLE = {
         message: 'This file is larger than 50 MB.',
         action: 'Open it in a new tab instead.'
     },
+    NO_DEVICE: {
+        status: 503,
+        message: 'No device is connected to your account.',
+        action: 'Open the Mollama desktop app on a computer and sign in.'
+    },
+    DEVICE_OFFLINE: {
+        status: 503,
+        message: 'This device is not connected right now.',
+        action: 'Open the Mollama desktop app on that computer, or pick another device.'
+    },
     UNKNOWN: {
         status: 502,
         message: 'Ollama reported a problem it did not explain.',
@@ -194,7 +204,7 @@ export const ERROR_CODES = Object.keys(ERROR_TABLE);
 
 const STATUS_TIMEOUT_MS = 3000;
 
-const defaultFactory = (host) => new Ollama({ host });
+const defaultFactory = (host, fetchThrough = null) => new Ollama(fetchThrough ? { host, fetch: fetchThrough } : { host });
 let clientFactory = defaultFactory;
 
 export const setOllamaClientFactory = (factory) => {
@@ -213,10 +223,11 @@ const withTimeout = (promise, ms) => {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
 
-export const createOllamaClient = (host) => {
+export const createOllamaClient = (host, fetchThrough = null) => {
+    const make = () => (fetchThrough ? defaultFactory(host, fetchThrough) : clientFactory(host));
     const call = async (run) => {
         try {
-            return await run(clientFactory(host));
+            return await run(make());
         } catch (error) {
             throw mapOllamaError(error);
         }
@@ -227,7 +238,7 @@ export const createOllamaClient = (host) => {
 
         async status() {
             try {
-                const { version } = await withTimeout(clientFactory(host).version(), STATUS_TIMEOUT_MS);
+                const { version } = await withTimeout(make().version(), STATUS_TIMEOUT_MS);
                 return { available: true, version };
             } catch {
                 return { available: false, version: null };
@@ -245,6 +256,177 @@ export const createOllamaClient = (host) => {
         load: (model, keepAlive, numCtx) => call((client) => client.generate({ model, prompt: '', keep_alive: keepAlive, options: { num_ctx: numCtx } }))
     };
 };
+
+// Holds the live connection from each signed-in desktop app and carries Ollama requests to it.
+// A request travels as { id, type: 'request', method, path, headers, body } and comes back as
+// 'head', then 'chunk' messages (base64), then 'end'; 'ask' fetches hardware or disk details.
+export class DeviceGateway extends EventEmitter {
+    constructor() {
+        super();
+        this.setMaxListeners(100);
+        this.devices = new Map();
+        this.counter = 0;
+        this.helloMs = 10000;
+        this.askMs = 15000;
+    }
+
+    isOnline(deviceId) {
+        return this.devices.has(String(deviceId));
+    }
+
+    handleConnection(ws, verify) {
+        const timer = setTimeout(() => ws.close(1008, 'No hello'), this.helloMs);
+        timer.unref?.();
+        ws.once('message', async (raw) => {
+            clearTimeout(timer);
+            let hello = null;
+            try {
+                hello = JSON.parse(String(raw));
+            } catch {
+                hello = null;
+            }
+            const deviceId = hello ? await Promise.resolve(verify(hello)).catch(() => null) : null;
+            if (!deviceId) return ws.close(1008, 'Device not recognised');
+            return this.attach(String(deviceId), ws, hello);
+        });
+    }
+
+    attach(deviceId, ws, hello = {}) {
+        const entry = { ws, pending: new Map() };
+        const earlier = this.devices.get(deviceId);
+        this.devices.set(deviceId, entry);
+        earlier?.ws.close(1000, 'Replaced');
+
+        ws.on('message', (raw) => {
+            let message = null;
+            try {
+                message = JSON.parse(String(raw));
+            } catch {
+                return;
+            }
+            entry.pending.get(String(message.id))?.[message.type]?.(message);
+        });
+        ws.on('close', () => {
+            const current = this.devices.get(deviceId) === entry;
+            if (current) this.devices.delete(deviceId);
+            for (const waiting of [...entry.pending.values()]) waiting.fail();
+            if (current) this.emit('offline', deviceId);
+        });
+        ws.on('error', () => {});
+
+        this.send(entry, { type: 'welcome' });
+        this.emit('online', deviceId, hello);
+    }
+
+    send(entry, message) {
+        try {
+            entry.ws.send(JSON.stringify(message));
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    disconnect(deviceId) {
+        this.devices.get(String(deviceId))?.ws.close(1000, 'Removed');
+    }
+
+    ask(deviceId, what) {
+        return new Promise((resolve, reject) => {
+            const entry = this.devices.get(String(deviceId));
+            if (!entry) return reject(new OllamaError('DEVICE_OFFLINE'));
+            const id = String(++this.counter);
+            const timer = setTimeout(() => finish(() => reject(new OllamaError('DEVICE_OFFLINE'))), this.askMs);
+            timer.unref?.();
+            const finish = (settle) => {
+                clearTimeout(timer);
+                entry.pending.delete(id);
+                settle();
+            };
+            entry.pending.set(id, {
+                answer: (message) => finish(() => resolve(message.data)),
+                error: () => finish(() => reject(new OllamaError('DEVICE_OFFLINE'))),
+                fail: () => finish(() => reject(new OllamaError('DEVICE_OFFLINE')))
+            });
+            if (!this.send(entry, { id, type: 'ask', what })) entry.pending.get(id)?.fail();
+            return undefined;
+        });
+    }
+
+    fetcher(deviceId) {
+        return (input, init = {}) => new Promise((resolve, reject) => {
+            const entry = this.devices.get(String(deviceId));
+            if (!entry) return reject(new OllamaError('DEVICE_OFFLINE'));
+
+            const id = String(++this.counter);
+            const url = new URL(typeof input === 'string' ? input : input.url);
+            let controller = null;
+            let answered = false;
+            const drop = (error) => {
+                if (!entry.pending.delete(id)) return;
+                if (answered) {
+                    try {
+                        controller.error(error);
+                    } catch { /* already closed */ }
+                } else {
+                    reject(error);
+                }
+            };
+            const cancel = () => {
+                if (entry.pending.has(id)) this.send(entry, { id, type: 'cancel' });
+            };
+            const stream = new ReadableStream({
+                start: (given) => { controller = given; },
+                cancel: () => {
+                    cancel();
+                    entry.pending.delete(id);
+                }
+            });
+
+            entry.pending.set(id, {
+                head: (message) => {
+                    answered = true;
+                    const empty = [204, 205, 304].includes(message.status);
+                    if (empty) entry.pending.delete(id);
+                    resolve(new Response(empty ? null : stream, { status: message.status, headers: message.headers || {} }));
+                },
+                chunk: (message) => {
+                    try {
+                        controller.enqueue(new Uint8Array(Buffer.from(message.data, 'base64')));
+                    } catch { /* reader gone */ }
+                },
+                end: () => {
+                    entry.pending.delete(id);
+                    try {
+                        controller.close();
+                    } catch { /* already closed */ }
+                },
+                error: (message) => drop(message.code === 'OLLAMA_DOWN' ? new OllamaError('OLLAMA_DOWN') : new OllamaError('DEVICE_OFFLINE')),
+                fail: () => drop(new OllamaError('DEVICE_OFFLINE'))
+            });
+
+            init.signal?.addEventListener('abort', () => {
+                cancel();
+                drop(new DOMException('This operation was aborted', 'AbortError'));
+            }, { once: true });
+
+            const headers = {};
+            new Headers(init.headers || {}).forEach((value, name) => { headers[name] = value; });
+            const sent = this.send(entry, {
+                id,
+                type: 'request',
+                method: init.method || 'GET',
+                path: url.pathname + url.search,
+                headers,
+                body: init.body === undefined || init.body === null ? undefined : String(init.body)
+            });
+            if (!sent) entry.pending.get(id)?.fail();
+            return undefined;
+        });
+    }
+}
+
+export const deviceGateway = new DeviceGateway();
 
 const MB = 1024 * 1024;
 
