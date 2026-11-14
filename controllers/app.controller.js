@@ -2489,7 +2489,7 @@ const submitContactForm = asyncHandler(async (req, res, next) => {
         // Confirmation Email to User
         sendEmail({
             to: email,
-            subject: 'We received your message - AI Base',
+            subject: 'We received your message - Mollama',
             template: 'contact-confirmation',
             data: {
                 name,
@@ -2515,7 +2515,7 @@ const isOwnerOfTheme = (user, theme) =>
     theme.owner && user && theme.owner.toString() === user.id.toString();
 
 /**
- * @desc    List built-in preset themes (the seeded AI Base six)
+ * @desc    List built-in preset themes (the seeded Mollama six)
  * @route   GET /api/v1/themes/presets
  * @access  Public
  */

@@ -1,5 +1,5 @@
 /**
- * Entry point for the AI Base Server application
+ * Entry point for the Mollama Server application
  * Creates and starts the server instance
  */
 

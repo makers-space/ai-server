@@ -1,5 +1,5 @@
 /**
- * Universal appLogger utility for AI Base
+ * Universal appLogger utility for Mollama
  * Provides structured logging using Winston with beautiful console output
  */
 

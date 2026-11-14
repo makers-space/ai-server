@@ -22,6 +22,9 @@ import {
     getEmailTransporter
 } from './app.controller.js';
 import {
+    adminOnly,
+    adminOnlyBlocks,
+    ADMIN_ONLY_MESSAGE,
     generateTokenFamilyId,
     storeTokenFamily,
     markRefreshTokenUsed,
@@ -188,7 +191,7 @@ const sendPasswordResetEmail = async (user, resetToken, resetUrl, transporter = 
  */
 const sendWelcomeEmail = async (user, transporter = null) => {
     return sendEmail({
-        to: user.email, subject: 'Welcome to AI Base!', template: 'welcome', data: {
+        to: user.email, subject: 'Welcome to Mollama!', template: 'welcome', data: {
             firstName: user.firstName || user.name || 'User',
             email: user.email,
             loginUrl: `${process.env.APP_URL}/auth/login`
@@ -257,6 +260,10 @@ const authController = {
         logger.info(`${logger.safeColor(logger.colors.cyan)}[Auth Controller]${logger.safeColor(logger.colors.reset)} Signup request received...`, {ip: req.ip});
         logger.verbose('[Auth Controller - Signup] Request headers:', {headers: req.headers});
         logger.verbose('[Auth Controller - Signup] Request body structure:', {bodyKeys: Object.keys(req.body || {})});
+
+        if (adminOnly() && !req.user) {
+            return res.status(403).json({success: false, message: ADMIN_ONLY_MESSAGE});
+        }
 
         // Early validation before the try block to catch invalid requests
         if (!req.body || typeof req.body !== 'object' || Object.keys(req.body).length === 0 || Object.values(req.body).every(x => x === null || x === undefined)) {
@@ -482,6 +489,10 @@ const authController = {
                 return res.status(401).json({
                     success: false, message: 'Account is deactivated'
                 });
+            }
+
+            if (adminOnlyBlocks(user.roles)) {
+                return res.status(403).json({success: false, message: ADMIN_ONLY_MESSAGE});
             }
 
             // Check 2FA if enabled

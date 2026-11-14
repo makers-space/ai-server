@@ -396,7 +396,7 @@ class Server {
                     appController.getHealth(mockReq, mockRes);
 
                     // Now show startup banner
-                    await logger.startupMessage("AI Base", serverPort, this.config.environment);
+                    await logger.startupMessage("Mollama", serverPort, this.config.environment);
 
                     resolve(this.server);
                 });

@@ -71,7 +71,7 @@ export const requireDatabase = (req, res, next) => {
     res.status(503).json({
         success: false,
         code: 'DATABASE_DOWN',
-        message: 'AI Base cannot reach its database.',
+        message: 'Mollama cannot reach its database.',
         action: 'Check the internet connection. A download that is running carries on by itself.'
     });
 };

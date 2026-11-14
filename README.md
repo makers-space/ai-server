@@ -1,6 +1,6 @@
-# AI Base Server
+# Mollama Server
 
-**Server for AI Base: a web UI for running local AI models through Ollama**
+**Server for Mollama: a web UI for running local AI models through Ollama**
 
 Node.js + Express server built from the App Base template. It keeps the template's authentication, role-based access control, Redis caching and email service, and talks to a local Ollama through the official `ollama` package. The Ollama address is set with `OLLAMA_BASE_URL`.
 
@@ -32,7 +32,7 @@ Node.js + Express server built from the App Base template. It keeps the template
 1. **Clone and Install**
    ```bash
    git clone <repository-url>
-   cd ai-base/server
+   cd mollama/server
    npm install
    ```
 
@@ -49,7 +49,7 @@ Node.js + Express server built from the App Base template. It keeps the template
    node -e "console.log('REFRESH_TOKEN_SECRET=' + require('crypto').randomBytes(32).toString('hex'))"
    
    # MongoDB connection (Required)
-   MONGODB_URI=mongodb://localhost:27017/ai-base-db
+   MONGODB_URI=mongodb://localhost:27017/mollama-db
    
    # Redis cache (Optional but recommended)
    REDIS_URL=redis://localhost:6379
@@ -162,7 +162,7 @@ MongoDB Atlas is a fully managed cloud database service. Follow these steps to s
 2. Choose **"M0 FREE"** tier (includes 512 MB storage - perfect for development)
 3. Select your preferred **Cloud Provider** (AWS, Google Cloud, or Azure)
 4. Choose a **Region** closest to your location for best performance
-5. Name your cluster (e.g., `AIBaseCluster`) or keep the default name
+5. Name your cluster (e.g., `MollamaCluster`) or keep the default name
 6. Click **"Create Cluster"** (this takes 3-5 minutes)
 
 ### Step 3: Create Database User
@@ -170,7 +170,7 @@ MongoDB Atlas is a fully managed cloud database service. Follow these steps to s
 1. Click **"Database Access"** in the left sidebar under Security
 2. Click **"Add New Database User"**
 3. Choose **"Password"** authentication method
-4. Set a username (e.g., `aibaseuser`)
+4. Set a username (e.g., `mollamauser`)
 5. Click **"Autogenerate Secure Password"** or create your own strong password
 6. **Important**: Copy and save this password securely - you'll need it for your connection string
 7. Under **"Database User Privileges"**, select **"Read and write to any database"**
@@ -200,13 +200,13 @@ MongoDB Atlas is a fully managed cloud database service. Follow these steps to s
 1. Open your `.env` file in the server directory
 2. Replace the `MONGODB_URI` value with your connection string:
    ```bash
-   MONGODB_URI=mongodb+srv://aibaseuser:YOUR_PASSWORD@cluster.mongodb.net/ai-base-db?retryWrites=true&w=majority&appName=AIBase
+   MONGODB_URI=mongodb+srv://mollamauser:YOUR_PASSWORD@cluster.mongodb.net/mollama-db?retryWrites=true&w=majority&appName=Mollama
    ```
 3. **Important replacements**:
-   - Replace `<username>` with your database username (e.g., `aibaseuser`)
+   - Replace `<username>` with your database username (e.g., `mollamauser`)
    - Replace `<password>` with your actual database password
-   - Add your database name after `.net/` (e.g., `ai-base-db`)
-   - Add `&appName=AIBase` at the end for better monitoring
+   - Add your database name after `.net/` (e.g., `mollama-db`)
+   - Add `&appName=Mollama` at the end for better monitoring
 
 ### Step 7: Test Your Connection
 
@@ -218,7 +218,7 @@ npm run dev
 
 Look for this success message in the console:
 ```
-🌱 MongoDB connection established! cluster.mongodb.net/ai-base-db
+🌱 MongoDB connection established! cluster.mongodb.net/mollama-db
 ⚡ Transaction support confirmed
 ```
 
@@ -295,7 +295,7 @@ Gmail provides free SMTP service that's easy to set up. Follow these steps:
 2. Under **"How you sign in to Google"**, click **"App passwords"**
    - If you don't see this option, make sure 2-Step Verification is enabled
 3. Click **"Select app"** and choose **"Other (Custom name)"**
-4. Enter a name like "AI Base Server" or "Node Mailer"
+4. Enter a name like "Mollama Server" or "Node Mailer"
 5. Click **"Generate"**
 6. **Important**: Copy the 16-character app password shown (format: `xxxx xxxx xxxx xxxx`)
    - You won't be able to see this password again!
@@ -396,7 +396,7 @@ curl -X POST http://localhost:8090/api/v1/email/test \
   -d '{
     "to": "your-test-email@example.com",
     "subject": "Test Email",
-    "text": "This is a test email from AI Base!"
+    "text": "This is a test email from Mollama!"
   }'
 ```
 
@@ -495,7 +495,7 @@ Content-Type: application/json
   "data": {
     "firstName": "John",
     "email": "john@example.com",
-    "appName": "AI Base",
+    "appName": "Mollama",
     "appUrl": "http://localhost:8090"
   }
 }
@@ -807,7 +807,7 @@ Before deploying to production, ensure:
 #### Database Connection Failed
 ```bash
 # Check MongoDB status
-mongosh mongodb://localhost:27017/ai-base-db
+mongosh mongodb://localhost:27017/mollama-db
 ```
 
 #### Redis Connection Issues

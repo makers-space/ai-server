@@ -1,5 +1,5 @@
 /**
- * The six built-in AI Base themes as seedable token documents.
+ * The six built-in Mollama themes as seedable token documents.
  * Values are extracted from web/src/styles/themes/*.css — the CSS files
  * remain the source of truth for the web app's own rendering; these documents
  * exist so presets are listable, forkable, and consumable by mobile.

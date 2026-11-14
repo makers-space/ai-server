@@ -3,7 +3,7 @@
  *
  * A theme is a JSON token document. The web app compiles tokens to CSS custom
  * properties scoped to `.theme-<slug>` at runtime; the mobile app consumes the
- * token object directly. The six AI Base themes are seeded as locked presets
+ * token object directly. The six Mollama themes are seeded as locked presets
  * (isPreset: true) so the component contract never changes.
  */
 
@@ -48,7 +48,7 @@ const themeSchema = new mongoose.Schema({
         required: function () { return !this.isPreset; },
         index: true
     },
-    /** Built-in preset themes (seeded from AI Base's six themes) are locked */
+    /** Built-in preset themes (seeded from Mollama's six themes) are locked */
     isPreset: {
         type: Boolean,
         default: false

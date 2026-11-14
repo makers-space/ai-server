@@ -641,7 +641,7 @@ const realRemote = {
     request: (url, pinned) => new Promise((resolve, reject) => {
         const request = https.get(url, {
             timeout: 20000,
-            headers: { 'User-Agent': 'AI-Base/1.0 (local file viewer)', Accept: '*/*' },
+            headers: { 'User-Agent': 'Mollama/1.0 (local file viewer)', Accept: '*/*' },
             lookup: (hostname, options, callback) => (options?.all
                 ? callback(null, [{ address: pinned.address, family: pinned.family }])
                 : callback(null, pinned.address, pinned.family))
