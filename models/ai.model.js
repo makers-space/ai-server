@@ -258,6 +258,7 @@ const chatSchema = new mongoose.Schema({
     title: { type: String, default: 'New chat', trim: true, maxlength: 120 },
     titled: { type: Boolean, default: false },
     model: { type: String, default: null },
+    device: { type: mongoose.Schema.Types.ObjectId, ref: 'Device', default: null },
     system: { type: String, default: '' },
     systemSource: { type: String, default: null },
     instructions: { type: [instructionSchema], default: [] },
@@ -301,6 +302,7 @@ export const promptSchemas = {
 const chatFields = {
     title: Joi.string().trim().min(1).max(120),
     model: modelName.allow(null),
+    device: Joi.objectId().allow(null),
     system: Joi.string().max(100000).allow(''),
     systemSource: Joi.string().max(1000).allow(null, ''),
     instructions: Joi.array().max(10).items(Joi.object(instruction)),

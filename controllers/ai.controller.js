@@ -1296,6 +1296,7 @@ const presentChat = (chat, facts = null) => ({
     id: chat.id,
     title: chat.title,
     model: chat.model,
+    device: chat.device ? String(chat.device) : null,
     system: systemText(chat),
     systemSource: chat.systemSource,
     instructions: instructionsOf(chat),
@@ -1377,9 +1378,26 @@ export const listChats = asyncHandler(async (req, res) => {
     });
 });
 
+// A chat runs on the computer it was given; without one it follows the request, and remembers a linked computer.
+const chatTarget = async (req, chat) => {
+    const device = chat.device ? await allowedDevice(req, chat.device) : null;
+    return device ? targetOf(device) : currentTarget();
+};
+
+// False when the request names a computer this person may not use.
+const setChatDevice = async (req, chat) => {
+    if (!('device' in (req.body || {}))) return true;
+    const device = req.body.device ? await allowedDevice(req, req.body.device) : null;
+    if (req.body.device && !device) return false;
+    chat.device = device ? device._id : null;
+    return true;
+};
+
 export const createChat = asyncHandler(async (req, res) => {
     const chat = new Chat({ owner: req.user.id });
     applyChatFields(chat, req.body || {});
+    if (!(await setChatDevice(req, chat))) return res.status(404).json({ success: false, message: 'Device not found' });
+    deviceScope.enterWith(await chatTarget(req, chat));
     await chat.save();
     res.status(201).json({ success: true, chat: presentChat(chat, await factsOrNull(chat)) });
 });
@@ -1387,6 +1405,7 @@ export const createChat = asyncHandler(async (req, res) => {
 export const getChat = asyncHandler(async (req, res) => {
     const chat = await findChat(req, res);
     if (!chat) return;
+    deviceScope.enterWith(await chatTarget(req, chat));
     res.status(200).json({ success: true, chat: presentChat(chat, await factsOrNull(chat)) });
 });
 
@@ -1394,6 +1413,8 @@ export const updateChat = asyncHandler(async (req, res) => {
     const chat = await findChat(req, res);
     if (!chat) return;
     applyChatFields(chat, req.body);
+    if (!(await setChatDevice(req, chat))) return res.status(404).json({ success: false, message: 'Device not found' });
+    deviceScope.enterWith(await chatTarget(req, chat));
     await chat.save();
     res.status(200).json({ success: true, chat: presentChat(chat, await factsOrNull(chat)) });
 });
@@ -2008,6 +2029,9 @@ const takeTurns = async (chat, body, userId, res) => {
 export const sendMessage = asyncHandler(async (req, res) => {
     const chat = await findChat(req, res);
     if (!chat) return;
+    const target = await chatTarget(req, chat);
+    deviceScope.enterWith(target);
+    if (!chat.device && target.kind === 'companion') chat.device = target.id;
     if (!busyChats.has(chat.id)) return takeTurns(chat, req.body, req.user.id, res);
     if (req.body.regenerate || req.body.editIndex !== undefined) {
         return res.status(409).json({ success: false, message: 'This chat is still replying. Stop it or wait for it to finish.' });
@@ -2092,6 +2116,7 @@ export const loadModel = asyncHandler(async (req, res) => {
 export const summariseChat = asyncHandler(async (req, res) => {
     const chat = await findChat(req, res);
     if (!chat) return;
+    deviceScope.enterWith(await chatTarget(req, chat));
     if (chat.messages.length === 0) {
         return res.status(400).json({ success: false, message: 'There is nothing to summarise yet.' });
     }
