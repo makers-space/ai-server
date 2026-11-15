@@ -11,8 +11,8 @@ import { Ollama } from 'ollama';
 const ERROR_TABLE = {
     OLLAMA_DOWN: {
         status: 503,
-        message: 'Ollama is not running on this device.',
-        action: 'Start Ollama, then check again.'
+        message: 'Ollama is not running on the computer chosen for models.',
+        action: 'Start Ollama there, or pick another computer.'
     },
     MODEL_MISSING: {
         status: 404,
@@ -143,6 +143,11 @@ const ERROR_TABLE = {
         status: 503,
         message: 'No device is connected to your account.',
         action: 'Open the Mollama desktop app on a computer and sign in.'
+    },
+    NOTHING_READY: {
+        status: 503,
+        message: 'None of your computers can run models right now.',
+        action: 'Open the Mollama desktop app on one of them and make sure Ollama is running.'
     },
     DEVICE_OFFLINE: {
         status: 503,
@@ -678,14 +683,23 @@ export class GenerationQueue extends EventEmitter {
         return ordered;
     }
 
-    ahead(job) {
-        if (job.state !== 'waiting') return 0;
-        return this.order().indexOf(job) + this.running.size;
+    // Each computer is its own lane: replies wait only behind others on the same computer.
+    runningIn(lane) {
+        return [...this.running].filter((job) => job.lane === String(lane)).length;
     }
 
-    add({ userId, priority = 'interactive', run }) {
+    busyIn(lane) {
+        return this.runningIn(lane) > 0 || this.waiting.some((job) => job.lane === String(lane));
+    }
+
+    ahead(job) {
+        if (job.state !== 'waiting') return 0;
+        return this.order().filter((other) => other.lane === job.lane).indexOf(job) + this.runningIn(job.lane);
+    }
+
+    add({ userId, priority = 'interactive', run, lane = 'local' }) {
         if (this.waitingFor(userId) >= this.perUserLimit) throw new OllamaError('QUEUE_FULL');
-        const job = { userId: String(userId), priority, run, state: 'waiting', sequence: ++this.sequenceNumber };
+        const job = { userId: String(userId), priority, run, lane: String(lane), state: 'waiting', sequence: ++this.sequenceNumber };
         job.done = new Promise((resolve, reject) => {
             job.resolve = resolve;
             job.reject = reject;
@@ -707,8 +721,9 @@ export class GenerationQueue extends EventEmitter {
     }
 
     pump() {
-        while (this.running.size < this.maxConcurrent && this.waiting.length > 0) {
-            const job = this.order()[0];
+        for (;;) {
+            const job = this.order().find((next) => this.runningIn(next.lane) < this.maxConcurrent);
+            if (!job) break;
             this.waiting = this.waiting.filter((other) => other !== job);
             this.lastServed.set(job.userId, ++this.tick);
             this.running.add(job);

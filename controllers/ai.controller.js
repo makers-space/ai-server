@@ -59,6 +59,11 @@ const localEnabled = () => (process.env.LOCAL_DEVICE ? process.env.LOCAL_DEVICE 
 const currentTarget = () => deviceScope.getStore() || (localEnabled() ? LOCAL_TARGET : NO_TARGET);
 const targetOf = (device) => (device.kind === 'companion' ? { kind: 'companion', id: String(device.id) } : LOCAL_TARGET);
 
+const currentLane = () => {
+    const target = currentTarget();
+    return target.kind === 'companion' ? target.id : target.kind;
+};
+
 const getOllama = async () => {
     const target = currentTarget();
     if (target.kind === 'companion') return createOllamaClient(DEVICE_HOST, deviceGateway.fetcher(target.id));
@@ -734,8 +739,21 @@ export const getSetupStatus = asyncHandler(async (req, res) => {
     const ollama = reachable ? await readOllama(await getOllama()) : UNREACHED;
     const problem = !device ? 'NO_DEVICE' : !reachable ? 'DEVICE_OFFLINE' : 'OLLAMA_DOWN';
 
+    // Any of the person's computers will do, so the others are asked before anything is called a problem.
+    let ready = ollama.available ? device.id : null;
+    let count = device ? 1 : 0;
+    if (!ready) {
+        const local = localEnabled() ? await getLocalDevice() : null;
+        const others = [...(local ? [local] : []), ...await ownDevices(req.user.id)].filter((other) => other.id !== device?.id);
+        count += others.length;
+        const answers = await Promise.all(others.map((other) => Promise.resolve(ollamaOf(other)).catch(() => UNREACHED)));
+        ready = others[answers.findIndex((answer) => answer.available)]?.id || null;
+    }
+
     res.status(200).json({
         success: true,
+        ready,
+        account: ready ? { available: true } : { available: false, ...new OllamaError(count > 1 ? 'NOTHING_READY' : problem).toJSON() },
         ollama: ollama.available
             ? ollama
             : { ...ollama, ...new OllamaError(problem).toJSON() },
@@ -1828,10 +1846,11 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
     write({ type: 'accepted', chat: { id: chat.id, title: chat.title, model: chat.model }, messageCount: chat.messages.length });
 
     const reply = { content: '', thinking: '', stats: {}, errorCode: null, stopped: false, steps: [], unverified: [] };
+    const lane = currentLane();
     const run = async () => {
         if (gone) return;
         const loaded = await ollama.running().then((list) => list.models.some((entry) => entry.name === chat.model)).catch(() => true);
-        write({ type: 'start', sharing: queue.running.size - 1, loaded });
+        write({ type: 'start', sharing: queue.runningIn(lane) - 1, loaded });
         const appSearch = webSearchReady() && process.env.WEB_SEARCH_MODE !== 'tools';
         const searching = webSearchReady() && !appSearch && facts.capabilities.includes('tools');
         const messages = [...prompt];
@@ -1958,7 +1977,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
     };
 
     try {
-        job = queue.add({ userId, priority: 'interactive', run });
+        job = queue.add({ userId, priority: 'interactive', run, lane });
         queue.on('moved', reportPlace);
         await job.done;
     } catch (error) {
@@ -2097,7 +2116,7 @@ export const loadModel = asyncHandler(async (req, res) => {
         if (!(await ollama.status()).available) throw new OllamaError('OLLAMA_DOWN');
         const model = req.body?.name || await chooseModel(ollama, req.user.id);
         const loaded = (await ollama.running()).models.some((entry) => entry.name === model);
-        const busy = queue.running.size > 0 || queue.waiting.length > 0;
+        const busy = queue.busyIn(currentLane());
         const loading = !loaded && !busy && settings.keepAliveMinutes > 0;
         if (loading) {
             const facts = await modelFacts(ollama, model);
@@ -2140,6 +2159,7 @@ export const summariseChat = asyncHandler(async (req, res) => {
 
         const job = queue.add({
             userId: req.user.id,
+            lane: currentLane(),
             priority: 'interactive',
             run: () => ollama.chat({
                 model: chat.model,
