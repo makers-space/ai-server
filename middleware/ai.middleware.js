@@ -304,13 +304,17 @@ export class DeviceGateway extends EventEmitter {
             } catch {
                 return;
             }
+            if (message.type === 'goodbye') {
+                entry.leaving = true;
+                return;
+            }
             entry.pending.get(String(message.id))?.[message.type]?.(message);
         });
         ws.on('close', () => {
             const current = this.devices.get(deviceId) === entry;
             if (current) this.devices.delete(deviceId);
             for (const waiting of [...entry.pending.values()]) waiting.fail();
-            if (current) this.emit('offline', deviceId);
+            if (current) this.emit(entry.leaving ? 'goodbye' : 'offline', deviceId);
         });
         ws.on('error', () => {});
 

@@ -11,7 +11,7 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, createOllamaClient, detectHardware, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
+    OllamaError, mapOllamaError, createOllamaClient, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway
 } from '../middleware/ai.middleware.js';
@@ -498,8 +498,11 @@ const getCurrentDevice = async () => {
 const effectiveHardware = (device) => {
     const detected = device?.hardware?.toObject?.() || device?.hardware || {};
     const overrides = device?.overrides || {};
-    const gpuName = overrides.gpuName || detected.gpus?.[0]?.name || null;
-    const gpuMemoryMb = overrides.gpuMemoryMb ?? detected.gpuMemoryMb ?? 0;
+    // A Mac read by an older desktop app has no graphics recorded. An Apple chip always has them, so they are worked out here.
+    const appleChip = /^Apple /.test(detected.cpu || '') ? 'arm64' : '';
+    const [apple] = detected.gpus?.length ? [] : appleGpus({ platform: detected.platform, arch: appleChip, cpu: detected.cpu, memoryMb: detected.memoryMb || 0 });
+    const gpuName = overrides.gpuName || detected.gpus?.[0]?.name || apple?.name || null;
+    const gpuMemoryMb = overrides.gpuMemoryMb ?? (detected.gpuMemoryMb || apple?.memoryMb || 0);
 
     return {
         memoryMb: overrides.memoryMb ?? detected.memoryMb ?? null,
@@ -683,6 +686,15 @@ const announceDevice = (online) => async (deviceId) => {
 };
 deviceGateway.on('online', announceDevice(true));
 deviceGateway.on('offline', announceDevice(false));
+// Signing out of the desktop app takes that computer off the account.
+deviceGateway.on('goodbye', async (deviceId) => {
+    try {
+        const device = await Device.findOneAndDelete({ _id: deviceId, service: SERVICE, kind: 'companion' });
+        if (device?.registeredBy) getNotificationService().sendToUser(String(device.registeredBy), { type: 'device:changed', data: { deviceId: String(deviceId), online: false } });
+    } catch (error) {
+        logger.warn('[Device] Could not remove a device that signed out', { deviceId, error: error.message });
+    }
+});
 
 export const readSettings = asyncHandler(async (req, res) => {
     const settings = await getSettings();
