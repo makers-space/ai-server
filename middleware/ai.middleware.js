@@ -1012,29 +1012,40 @@ export const searchWeb = async (query) => {
 // The list of models comes live from ollama.com, which has no data address for its library, so its pages are read.
 const LIBRARY = 'https://ollama.com';
 const LIBRARY_KEEP_MS = 6 * 60 * 60 * 1000;
+const LIBRARY_PAGES = 40;
 const LIBRARY_ABILITIES = new Set(['vision', 'tools', 'thinking', 'embedding', 'audio', 'cloud']);
 const MB_PER_BILLION = 650;
-const libraryCache = new Map();
+const SHORT_NAMES = new Set(['gpt', 'oss', 'glm', 'lfm', 'ai', 'llm', 'qwq', 'bge']);
 let libraryFetch = null;
+let libraryList = null;
+const librarySizeCache = new Map();
 export const setLibraryFetch = (custom) => {
     libraryFetch = custom;
-    libraryCache.clear();
+    libraryList = null;
+    librarySizeCache.clear();
 };
 
-const libraryPage = async (address) => {
-    const kept = libraryCache.get(address);
-    if (kept && kept.until > Date.now()) return kept.html;
+// Pages after the first are only given to the site's own "load more" request, which the HX-Request header marks.
+const libraryPage = async (address, more = false) => {
     let response;
     try {
-        response = await (libraryFetch || fetch)(`${LIBRARY}${address}`, { headers: { Accept: 'text/html' }, signal: AbortSignal.timeout(12000) });
+        response = await (libraryFetch || fetch)(`${LIBRARY}${address}`, { headers: { Accept: 'text/html', ...(more ? { 'HX-Request': 'true' } : {}) }, signal: AbortSignal.timeout(12000) });
     } catch {
         throw new OllamaError('LIBRARY_UNREACHABLE');
     }
     if (!response.ok) throw new OllamaError('LIBRARY_UNREACHABLE');
-    const html = await response.text();
-    if (libraryCache.size >= 400) libraryCache.delete(libraryCache.keys().next().value);
-    libraryCache.set(address, { html, until: Date.now() + LIBRARY_KEEP_MS });
-    return html;
+    return response.text();
+};
+
+// "gemma3:12b" reads as "Gemma 3 12B"; the Ollama name is always shown beside it.
+export const friendlyName = (tag) => {
+    const [name, size = ''] = String(tag).split(':');
+    if (name.includes('/')) return String(tag);
+    const words = name.split(/[-_]/).filter(Boolean).map((word) => (SHORT_NAMES.has(word.toLowerCase())
+        ? word.toUpperCase()
+        : word.replace(/^([a-z]{3,})(\d)/i, '$1 $2').replace(/^[a-z]/, (letter) => letter.toUpperCase())));
+    const sized = parseParameters(size) !== null ? size.toUpperCase().replace('X', 'x') : size && size !== 'latest' ? size : '';
+    return [...words, sized].filter(Boolean).join(' ');
 };
 
 const plainText = (html) => html.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
@@ -1078,11 +1089,45 @@ export const parseLibrarySizes = (html) => {
 };
 
 export const librarySizes = async (name) => {
+    const kept = librarySizeCache.get(name);
+    if (kept && kept.until > Date.now()) return kept.sizes;
     try {
-        return parseLibrarySizes(await libraryPage(`/library/${encodeURIComponent(name)}/tags`));
+        const sizes = parseLibrarySizes(await libraryPage(`/library/${encodeURIComponent(name)}/tags`));
+        librarySizeCache.set(name, { sizes, until: Date.now() + LIBRARY_KEEP_MS });
+        return sizes;
     } catch {
         return new Map();
     }
+};
+
+// Reads the exact sizes of several models, a few at a time.
+export const loadLibrarySizes = async (names) => {
+    const waiting = [...new Set(names)].filter((name) => !(librarySizeCache.get(name)?.until > Date.now()));
+    await Promise.all(Array.from({ length: 8 }, async () => {
+        while (waiting.length > 0) await librarySizes(waiting.shift());
+    }));
+};
+
+// Every model in the library: the first page, then each further page until one adds nothing new.
+export const libraryModels = async () => {
+    if (libraryList && libraryList.until > Date.now()) return libraryList.models;
+    const models = parseLibrary(await libraryPage('/search'));
+    if (models.length === 0) throw new OllamaError('LIBRARY_UNREADABLE');
+    let complete = true;
+    for (let page = 2; page <= LIBRARY_PAGES; page++) {
+        let found;
+        try {
+            found = parseLibrary(await libraryPage(`/search?page=${page}`, true));
+        } catch {
+            complete = false;
+            break;
+        }
+        const fresh = found.filter((model) => !models.some((known) => known.name === model.name));
+        if (fresh.length === 0) break;
+        models.push(...fresh);
+    }
+    libraryList = { models, until: Date.now() + (complete ? LIBRARY_KEEP_MS : 5 * 60 * 1000) };
+    return models;
 };
 
 const purposesOf = (model) => {
@@ -1094,22 +1139,16 @@ const purposesOf = (model) => {
     return purposes;
 };
 
-// One entry for each size of each model, in the shape the fit and ranking work on.
-export const libraryCatalogue = async (query = '', page = 1) => {
-    const params = new URLSearchParams();
-    if (query) params.set('q', query);
-    if (page > 1) params.set('page', String(page));
-    const html = await libraryPage(`/search${params.size > 0 ? `?${params}` : ''}`);
-    const models = parseLibrary(html).filter((model) => model.sizes.length > 0 || !model.capabilities.includes('cloud'));
-    if (models.length === 0 && !query && page === 1) throw new OllamaError('LIBRARY_UNREADABLE');
-    const exact = await Promise.all(models.map((model) => librarySizes(model.name)));
-
-    const entries = models.flatMap((model, index) => (model.sizes.length > 0 ? model.sizes : ['latest']).map((size) => {
-        const known = exact[index].get(size) || null;
+// One entry for each size of each model, in the shape the fit and ranking work on. A size not read yet is estimated.
+export const libraryEntries = (models) => models
+    .filter((model) => model.sizes.length > 0 || !model.capabilities.includes('cloud'))
+    .flatMap((model) => (model.sizes.length > 0 ? model.sizes : ['latest']).map((size) => {
+        const known = librarySizeCache.get(model.name)?.sizes.get(size) || null;
         const parameters = parseParameters(size) ?? (known ? Math.round((known / MB_PER_BILLION) * 10) / 10 : 0);
+        const tag = `${model.name}:${size}`;
         return {
-            tag: `${model.name}:${size}`,
-            name: `${model.name}:${size}`,
+            tag,
+            name: friendlyName(tag),
             description: model.description,
             goodFor: purposesOf(model),
             parameters,
@@ -1120,9 +1159,8 @@ export const libraryCatalogue = async (query = '', page = 1) => {
             pulls: model.pulls,
             updated: model.updated
         };
-    })).filter((entry) => entry.sizeMb > 0);
-    return { entries, more: html.includes(`page=${page + 1}`) };
-};
+    }))
+    .filter((entry) => entry.sizeMb > 0);
 
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };

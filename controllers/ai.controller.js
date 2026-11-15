@@ -11,7 +11,7 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, createOllamaClient, libraryCatalogue, librarySizes, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
+    OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway
 } from '../middleware/ai.middleware.js';
@@ -19,10 +19,49 @@ import {
 const MB = 1024 * 1024;
 // Models seen in the live list from ollama.com, remembered so installed models can show their description and size.
 const knownModels = new Map();
-const liveCatalogue = async (query) => {
-    const found = await libraryCatalogue(String(query?.q || ''), Number(query?.page) || 1);
-    found.entries.forEach((entry) => knownModels.set(entry.tag, entry));
-    return { ...found, query: String(query?.q || ''), page: Number(query?.page) || 1 };
+const CATALOGUE_PAGE = 48;
+const POPULAR_MODELS = 40;
+const PICK_ORDER = { fast: 0, balanced: 1, best: 2 };
+// The whole library, searched and ordered on the server and handed out a page at a time.
+// Recommendations come only from the most downloaded models, so an obscure model is never the suggestion.
+const liveCatalogue = async (query, hardware) => {
+    const models = await libraryModels();
+    const words = String(query?.q || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const page = Number(query?.page) || 1;
+    const popular = new Set([...models].sort((a, b) => b.pulls - a.pulls).slice(0, POPULAR_MODELS).map((model) => model.name));
+    const matching = models.filter((model) => words.every((word) => `${model.name} ${model.description}`.toLowerCase().includes(word)));
+    await loadLibrarySizes(matching.filter((model) => popular.has(model.name)).map((model) => model.name));
+
+    const order = () => {
+        const entries = libraryEntries(matching);
+        const isPopular = (entry) => popular.has(entry.tag.split(':')[0]);
+        const all = hardware
+            ? [...rankCatalogue(entries.filter(isPopular), hardware), ...entries.filter((entry) => !isPopular(entry)).map((entry) => ({ ...entry, fit: fitModel(entry, hardware), pick: null }))]
+            : entries.map((entry) => ({ ...entry, fit: null, pick: null }));
+        return all.sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
+            || Number(b.fit?.fits ?? true) - Number(a.fit?.fits ?? true)
+            || b.pulls - a.pulls
+            || a.parameters - b.parameters);
+    };
+    const shown = (all) => all.slice((page - 1) * CATALOGUE_PAGE, page * CATALOGUE_PAGE);
+
+    // The page about to be shown gets its exact sizes, then the order is worked out again with them.
+    await loadLibrarySizes(shown(order()).map((entry) => entry.tag.split(':')[0]));
+    const all = order();
+    const entries = shown(all);
+    entries.forEach((entry) => knownModels.set(entry.tag, entry));
+    loadLibrarySizes(models.map((model) => model.name)).catch(() => {});
+
+    return {
+        all,
+        entries,
+        query: words.join(' '),
+        page,
+        more: page * CATALOGUE_PAGE < all.length,
+        total: all.length,
+        library: models.length,
+        fitting: hardware ? all.filter((entry) => entry.fit.fits).length : null
+    };
 };
 
 const canManage = (req) => hasRight(req.user.roles, RIGHTS.MANAGE_MODELS);
@@ -785,11 +824,12 @@ const describeInstalled = async (ollama, model, personalByName) => {
         shown = null;
     }
     const known = knownModels.get(model.name);
+    const friendly = friendlyName(model.name);
     const personal = personalByName.get(model.name) || personalByName.get(model.name.replace(/:latest$/, ''));
 
     return {
         name: model.name,
-        displayName: personal?.displayName || known?.name || model.name,
+        displayName: personal?.displayName || known?.name || friendly,
         description: known?.description || null,
         sizeBytes: model.size || 0,
         family: model.details?.family || null,
@@ -870,7 +910,7 @@ export const listRunning = asyncHandler(async (req, res) => {
                 const gpuPercent = size > 0 ? Math.min(100, Math.round((onGpu / size) * 100)) : 0;
                 return {
                     name: model.name,
-                    displayName: knownModels.get(model.name)?.name || model.name,
+                    displayName: knownModels.get(model.name)?.name || friendlyName(model.name),
                     sizeBytes: size,
                     gpuBytes: onGpu,
                     gpuPercent,
@@ -1065,11 +1105,10 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
     const hardware = { memoryMb: Number(memoryMb) || 0, gpuMemoryMb: Number(gpuMemoryMb) || 0 };
     let live;
     try {
-        live = await liveCatalogue(req.query);
+        live = await liveCatalogue(req.query, hasSpecs ? hardware : null);
     } catch (error) {
         return sendOllamaError(res, error);
     }
-    const catalogue = live.entries;
 
     res.status(200).json({
         success: true,
@@ -1077,10 +1116,13 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
         query: live.query,
         page: live.page,
         more: live.more,
+        total: live.total,
+        library: live.library,
+        fitting: live.fitting,
         hardware: hasSpecs ? hardware : null,
         reserved: { gpuMemoryMb: GPU_HEADROOM_MB, memoryMb: RAM_RESERVE_MB },
-        notes: hasSpecs ? fitNotes(catalogue, hardware) : [],
-        models: hasSpecs ? rankCatalogue(catalogue, hardware) : catalogue.map((entry) => ({ ...entry, fit: null, pick: null }))
+        notes: hasSpecs ? fitNotes(live.all, hardware) : [],
+        models: live.entries
     });
 });
 
@@ -1093,7 +1135,7 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
     const hardware = effectiveHardware(device);
     let live;
     try {
-        live = await liveCatalogue(req.query);
+        live = await liveCatalogue(req.query, hardware);
     } catch (error) {
         return sendOllamaError(res, error);
     }
@@ -1106,9 +1148,12 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
         query: live.query,
         page: live.page,
         more: live.more,
+        total: live.total,
+        library: live.library,
+        fitting: live.fitting,
         hardware,
         freeDiskMb: disk.diskFreeMb,
-        models: rankCatalogue(live.entries, hardware).map((entry) => ({
+        models: live.entries.map((entry) => ({
             ...entry,
             installed: installed.has(entry.tag),
             fitsDisk: disk.diskFreeMb === null ? true : entry.sizeMb <= disk.diskFreeMb
