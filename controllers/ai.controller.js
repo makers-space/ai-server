@@ -1224,15 +1224,53 @@ const capacityFor = (chat, facts) => {
     return chosen > 0 ? Math.min(chosen, facts.contextLength) : Math.min(facts.contextLength, AUTO_CONTEXT_LIMIT);
 };
 
-const GUIDE_PARTS = fs.readFileSync(path.join(import.meta.dirname, '..', 'config', 'ai.components.md'), 'utf8').replace(/\r\n/g, '\n').split(/\n=== ([A-Z ]+) ===\n/);
-const guidePart = (name) => (GUIDE_PARTS[GUIDE_PARTS.indexOf(name) + 1] || '').trim();
-export const COMPONENT_GUIDE = GUIDE_PARTS[0].trim();
-export const SEARCH_GUIDE = guidePart('WEB SEARCH');
-export const PLAN_GUIDE = guidePart('SEARCH PLAN');
-export const RESULTS_GUIDE = guidePart('WEB RESULTS');
-export const TOUCH_GUIDE = guidePart('TOUCH');
+// What the models are told lives in server/instructions: assistant.md is always sent, search.md is used by web search,
+// and each file in skills/ is a skill a chat can turn on or off.
+const INSTRUCTIONS = path.join(import.meta.dirname, '..', 'instructions');
+const readGuide = (file) => {
+    const text = fs.readFileSync(path.join(INSTRUCTIONS, file), 'utf8').replace(/\r\n/g, '\n');
+    const head = text.match(/^---\n([\s\S]*?)\n---\n/);
+    const facts = Object.fromEntries((head?.[1] || '').split('\n').map((line) => line.match(/^(\w+):\s*(.*)$/)).filter(Boolean).map((match) => [match[1], match[2].trim()]));
+    const parts = `\n${text.slice(head?.[0].length || 0)}`.split(/\n=== ([A-Z ]+) ===\n/);
+    return { facts, body: parts[0].trim(), part: (name) => (parts.includes(name) ? parts[parts.indexOf(name) + 1] : '').trim() };
+};
+const assistantGuide = readGuide('assistant.md');
+const searchGuide = readGuide('search.md');
+export const SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((file) => file.endsWith('.md')).map((file) => {
+    const guide = readGuide(path.join('skills', file));
+    return {
+        id: file.slice(0, -3),
+        name: guide.facts.name || file.slice(0, -3),
+        description: guide.facts.description || '',
+        default: guide.facts.default === 'true',
+        order: Number(guide.facts.order) || 99,
+        credit: guide.facts.credit || null,
+        text: guide.body,
+        touch: guide.part('TOUCH'),
+        remember: guide.part('REMEMBER')
+    };
+}).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+const skillsOf = (chat) => SKILLS.filter((skill) => (Array.isArray(chat.skills) ? chat.skills.includes(skill.id) : skill.default));
+const closingOf = (chat) => ['REMEMBER', assistantGuide.part('REMEMBER'), ...skillsOf(chat).map((skill) => skill.remember)].filter(Boolean).join('\n');
+// Extra guidance for one reply goes in before the closing reminder, which stays the last thing the model reads.
+const withGuide = (chat, content, guide) => {
+    const closing = closingOf(chat);
+    return content.endsWith(closing) ? `${content.slice(0, -closing.length)}${guide}\n\n${closing}` : `${content}\n\n${guide}`;
+};
+
+export const BASE_GUIDE = assistantGuide.body;
+export const CLOSING_GUIDE = closingOf({});
+export const COMPONENT_GUIDE = `${BASE_GUIDE}\n\n${SKILLS.find((skill) => skill.id === 'components').text}`;
+export const SEARCH_GUIDE = searchGuide.part('WEB SEARCH');
+export const PLAN_GUIDE = searchGuide.part('SEARCH PLAN');
+export const RESULTS_GUIDE = searchGuide.part('WEB RESULTS');
+export const TOUCH_GUIDE = SKILLS.find((skill) => skill.id === 'components').touch;
 const TOUCH_EVERY = 4;
-export const REVIEW_GUIDE = guidePart('SEARCH REVIEW');
+export const REVIEW_GUIDE = searchGuide.part('SEARCH REVIEW');
+
+export const listSkills = asyncHandler(async (req, res) => {
+    res.status(200).json({ success: true, skills: SKILLS.map(({ id, name, description, default: on, credit }) => ({ id, name, description, default: on, credit })) });
+});
 
 const MAX_PROMPTS = 100;
 
@@ -1263,7 +1301,9 @@ const touchAllowed = (chat) => {
 
 const buildMessages = (chat) => {
     const out = [];
-    const system = [COMPONENT_GUIDE, systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touchAllowed(chat) && TOUCH_GUIDE].filter(Boolean).join('\n\n');
+    const active = skillsOf(chat);
+    const touch = active.some((skill) => skill.id === 'components') && touchAllowed(chat) && TOUCH_GUIDE;
+    const system = [BASE_GUIDE, ...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
@@ -1326,6 +1366,8 @@ const presentChat = (chat, facts = null) => ({
     system: systemText(chat),
     systemSource: chat.systemSource,
     instructions: instructionsOf(chat),
+    skills: skillsOf(chat).map((skill) => skill.id),
+    webSearch: chat.webSearch !== false,
     summary: chat.summary,
     continuedFrom: chat.continuedFrom,
     options: chat.options || {},
@@ -1379,9 +1421,10 @@ const chooseModel = async (ollama, userId) => {
 };
 
 const applyChatFields = (chat, body) => {
-    for (const key of ['title', 'model', 'system', 'options']) {
+    for (const key of ['title', 'model', 'system', 'options', 'webSearch']) {
         if (key in body) chat[key] = body[key];
     }
+    if ('skills' in body) chat.skills = body.skills ? SKILLS.filter((skill) => body.skills.includes(skill.id)).map((skill) => skill.id) : undefined;
     if ('system' in body) chat.instructions = [];
     if ('instructions' in body) {
         chat.instructions = body.instructions.map(cleanInstruction);
@@ -1692,6 +1735,7 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
             lines.push(`Files found (${search.types.join(', ')}; each one was loaded successfully; use these in src):`);
             lines.push(...(files.length > 0 ? files.slice(0, FILES_PER_SEARCH).map((file) => `- ${file.url} (${file.type})`) : ['- none']));
         }
+        if (search.types.length === 0 && !lines.some((line) => line.startsWith('Text of '))) lines.push('No page text could be read for this search. Do not write its content from memory: tell the user it could not be read, and give them the links below.');
         lines.push('Pages (web pages, never for src; give as plain links):', ...pagesSeen.slice(0, 3).map((result) => `- ${clip(result.title, 100)} | ${result.url} | ${clip(result.content, 160).replace(/\s+/g, ' ')}`));
         sections.push(lines.join('\n'));
     };
@@ -1864,10 +1908,11 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         if (gone) return;
         const loaded = await ollama.running().then((list) => list.models.some((entry) => entry.name === chat.model)).catch(() => true);
         write({ type: 'start', sharing: queue.runningIn(lane) - 1, loaded });
-        const appSearch = webSearchReady() && process.env.WEB_SEARCH_MODE !== 'tools';
-        const searching = webSearchReady() && !appSearch && facts.capabilities.includes('tools');
+        const searchOn = webSearchReady() && chat.webSearch !== false;
+        const appSearch = searchOn && process.env.WEB_SEARCH_MODE !== 'tools';
+        const searching = searchOn && !appSearch && facts.capabilities.includes('tools');
         const messages = [...prompt];
-        if (searching) messages[0] = { role: 'system', content: `${messages[0].content}\n\n${SEARCH_GUIDE}` };
+        if (searching) messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, SEARCH_GUIDE) };
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -1876,7 +1921,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const searchCtx = sizeFor(messages, Math.ceil(MAX_RESULTS_CHARS / 4));
         let found = null;
         if (appSearch) {
-            messages[0] = { role: 'system', content: `${messages[0].content}\n\n${RESULTS_GUIDE}` };
+            messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, RESULTS_GUIDE) };
             try {
                 found = await Promise.race([stopSignal.then(() => null), gatherWeb({
                     ollama,

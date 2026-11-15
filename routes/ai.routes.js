@@ -30,6 +30,7 @@ router.validRoutes = [
     '/api/v1/models/downloads/cancel',
     '/api/v1/catalogue',
     '/api/v1/devices/:id/catalogue',
+    '/api/v1/skills',
     '/api/v1/chats',
     '/api/v1/chats/:id',
     '/api/v1/chats/:id/messages',
@@ -88,6 +89,7 @@ router.get('/devices/:id/catalogue', ...signedIn, withDeviceId, aiController.get
 
 const withChatId = validateRequest(chatSchemas.chatId, 'params');
 
+router.get('/skills', ...signedIn, aiController.listSkills);
 router.get('/chats', ...signedIn, validateRequest(chatSchemas.list, 'query'), aiController.listChats);
 router.post('/chats', ...signedIn, validateRequest(chatSchemas.create), aiController.createChat);
 router.get('/chats/:id', ...signedIn, withChatId, aiController.getChat);

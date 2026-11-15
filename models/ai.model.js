@@ -262,6 +262,8 @@ const chatSchema = new mongoose.Schema({
     system: { type: String, default: '' },
     systemSource: { type: String, default: null },
     instructions: { type: [instructionSchema], default: [] },
+    skills: { type: [String], default: undefined },
+    webSearch: { type: Boolean, default: true },
     summary: { type: String, default: '' },
     continuedFrom: { type: mongoose.Schema.Types.ObjectId, default: null },
     options: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
@@ -306,6 +308,8 @@ const chatFields = {
     system: Joi.string().max(100000).allow(''),
     systemSource: Joi.string().max(1000).allow(null, ''),
     instructions: Joi.array().max(10).items(Joi.object(instruction)),
+    skills: Joi.array().max(30).items(Joi.string().pattern(/^[a-z0-9-]{1,60}$/)).allow(null),
+    webSearch: Joi.boolean(),
     options: generationOptions
 };
 
