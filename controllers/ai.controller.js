@@ -509,6 +509,7 @@ const effectiveHardware = (device) => {
         gpuName,
         gpuMemoryMb,
         hasGpu: gpuMemoryMb > 0,
+        gpuShared: !overrides.gpuName && /built-in graphics$/.test(gpuName || ''),
         cpu: detected.cpu || null,
         cpuThreads: detected.cpuThreads || null,
         diskFreeMb: detected.diskFreeMb ?? null,
