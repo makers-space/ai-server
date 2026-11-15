@@ -1230,6 +1230,8 @@ export const COMPONENT_GUIDE = GUIDE_PARTS[0].trim();
 export const SEARCH_GUIDE = guidePart('WEB SEARCH');
 export const PLAN_GUIDE = guidePart('SEARCH PLAN');
 export const RESULTS_GUIDE = guidePart('WEB RESULTS');
+export const TOUCH_GUIDE = guidePart('TOUCH');
+const TOUCH_EVERY = 4;
 export const REVIEW_GUIDE = guidePart('SEARCH REVIEW');
 
 const MAX_PROMPTS = 100;
@@ -1253,9 +1255,15 @@ const systemText = (chat) => {
     return items.map((item) => `# ${item.name}\n\n${item.text}`).join('\n\n');
 };
 
+// The app, not the model, decides how often a decorative touch is allowed: only after several replies without any component.
+const touchAllowed = (chat) => {
+    const recent = chat.messages.filter((message) => message.role === 'assistant' && message.content).slice(-TOUCH_EVERY);
+    return recent.length === TOUCH_EVERY && recent.every((message) => !message.content.includes('```component'));
+};
+
 const buildMessages = (chat) => {
     const out = [];
-    const system = [COMPONENT_GUIDE, systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`].filter(Boolean).join('\n\n');
+    const system = [COMPONENT_GUIDE, systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touchAllowed(chat) && TOUCH_GUIDE].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
@@ -1514,6 +1522,7 @@ const SMALL_WORDS = new Set(['a', 'an', 'the', 'of', 'in', 'on', 'for', 'to', 'a
 const queryWords = (query) => [...new Set((String(query).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((word) => !SMALL_WORDS.has(word)))];
 const MAX_RESULTS_CHARS = 24000;
 const PAGES_PER_SEARCH = 3;
+const PAGES_TO_READ = 2;
 const FILES_PER_SEARCH = 6;
 const CHECKS_PER_SEARCH = 14;
 
@@ -1637,7 +1646,7 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
             results.forEach((result) => known.add(result.url));
             pagesSeen.push(...results.filter((result) => !pagesSeen.some((seen) => seen.url === result.url)));
 
-            const opened = results.slice(0, search.types.length > 0 ? PAGES_PER_SEARCH : 1);
+            const opened = results.slice(0, search.types.length > 0 ? PAGES_PER_SEARCH : PAGES_TO_READ);
             opened.forEach((result) => {
                 if (!openedPages.has(result.url)) note('web_fetch', result.url);
                 openedPages.add(result.url);
@@ -1645,9 +1654,13 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
             const pages = await Promise.allSettled(opened.map((result) => openPage(result.url)));
             const candidates = results.map((result) => result.url).filter((link) => search.types.includes(typeOfAddress(link))).map(rawAddress);
             pages.forEach((outcome, index) => {
+                const address = opened[index].url;
+                // The model is told when a page gave no text, so it does not fill the gap from memory.
+                if (search.types.length === 0 && (outcome.status !== 'fulfilled' || !(outcome.value.content || '').trim())) {
+                    lines.push(`The text of ${address} could not be read.`);
+                }
                 if (outcome.status !== 'fulfilled') return;
                 const page = outcome.value;
-                const address = opened[index].url;
                 const direct = typeOfContent(page.file);
                 if (direct && search.types.includes(direct) && !files.some((file) => file.url === address)) {
                     files.push({ url: address, type: direct });
