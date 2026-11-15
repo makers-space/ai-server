@@ -146,6 +146,7 @@ class DownloadManager extends EventEmitter {
             etaSeconds: speedBps > 0 && totalBytes > completedBytes ? Math.ceil((totalBytes - completedBytes) / speedBps) : null,
             error: errorCode ? new OllamaError(errorCode).toJSON() : null,
             requestedBy: doc.requestedBy,
+            device: doc.device ? String(doc.device) : null,
             createdAt: doc.createdAt,
             finishedAt: live.finishedAt !== undefined ? live.finishedAt : doc.finishedAt
         };
@@ -156,7 +157,7 @@ class DownloadManager extends EventEmitter {
     }
 
     async list() {
-        const docs = await Download.find({ service: SERVICE }).sort({ createdAt: -1 }).limit(30);
+        const docs = await Download.find({ service: SERVICE, device: currentTarget().id }).sort({ createdAt: -1 }).limit(30);
         return docs.map((doc) => this.present(doc));
     }
 
@@ -173,7 +174,7 @@ class DownloadManager extends EventEmitter {
 
     async clearFailed(model, keepId) {
         try {
-            const stale = await Download.find({ service: SERVICE, model, status: 'failed', _id: { $ne: keepId } });
+            const stale = await Download.find({ service: SERVICE, model, device: currentTarget().id, status: 'failed', _id: { $ne: keepId } });
             for (const doc of stale) {
                 this.live.delete(doc.id);
                 Object.assign(doc, { status: 'cancelled', finishedAt: new Date() });
@@ -196,7 +197,8 @@ class DownloadManager extends EventEmitter {
             }
         }
 
-        const open = await Download.find({ service: SERVICE, model, status: { $in: OPEN_STATES } });
+        const device = currentTarget().id;
+        const open = await Download.find({ service: SERVICE, model, device, status: { $in: OPEN_STATES } });
         let doc = open.find((candidate) => !FINAL_STATES.includes(this.live.get(candidate.id)?.status)) || null;
 
         if (doc && this.active?.id !== doc.id && (this.live.get(doc.id)?.status ?? doc.status) === 'paused') {
@@ -206,14 +208,14 @@ class DownloadManager extends EventEmitter {
             await doc.save();
         }
         if (!doc) {
-            doc = await Download.findOne({ service: SERVICE, model, status: 'failed' }).sort({ createdAt: -1 });
+            doc = await Download.findOne({ service: SERVICE, model, device, status: 'failed' }).sort({ createdAt: -1 });
             if (doc) {
                 this.live.delete(doc.id);
-                Object.assign(doc, { status: 'queued', errorCode: null, finishedAt: null, requestedBy: userId, device: currentTarget().id });
+                Object.assign(doc, { status: 'queued', errorCode: null, finishedAt: null, requestedBy: userId });
                 await doc.save();
             }
         }
-        if (!doc) doc = await Download.create({ model, requestedBy: userId, device: currentTarget().id });
+        if (!doc) doc = await Download.create({ model, requestedBy: userId, device });
         await this.clearFailed(model, doc.id);
 
         this.announce(doc);
@@ -1012,7 +1014,8 @@ export const streamDownloads = asyncHandler(async (req, res) => {
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     send('snapshot', await downloads.list());
 
-    const onProgress = (job) => send('progress', job);
+    const watched = currentTarget().id;
+    const onProgress = (job) => { if (job.device === watched) send('progress', job); };
     downloads.on('progress', onProgress);
     const keepAlive = setInterval(() => res.write(': keep-alive\n\n'), 15000);
 
