@@ -119,6 +119,16 @@ const ERROR_TABLE = {
         message: 'The search service is limiting requests right now.',
         action: 'Wait a few minutes before searching again.'
     },
+    LIBRARY_UNREACHABLE: {
+        status: 502,
+        message: 'The list of models could not be loaded from ollama.com.',
+        action: 'Check the connection and try again, or add a model by its name.'
+    },
+    LIBRARY_UNREADABLE: {
+        status: 502,
+        message: 'The list of models on ollama.com could not be read.',
+        action: 'Add a model by its name for now. The page layout on ollama.com may have changed.'
+    },
     SEARCH_REFUSED: {
         status: 502,
         message: 'The search service refused the request.',
@@ -997,6 +1007,121 @@ export const searchWeb = async (query) => {
         url: String(result.url ?? ''),
         content: String(result.content ?? '')
     }));
+};
+
+// The list of models comes live from ollama.com, which has no data address for its library, so its pages are read.
+const LIBRARY = 'https://ollama.com';
+const LIBRARY_KEEP_MS = 6 * 60 * 60 * 1000;
+const LIBRARY_ABILITIES = new Set(['vision', 'tools', 'thinking', 'embedding', 'audio', 'cloud']);
+const MB_PER_BILLION = 650;
+const libraryCache = new Map();
+let libraryFetch = null;
+export const setLibraryFetch = (custom) => {
+    libraryFetch = custom;
+    libraryCache.clear();
+};
+
+const libraryPage = async (address) => {
+    const kept = libraryCache.get(address);
+    if (kept && kept.until > Date.now()) return kept.html;
+    let response;
+    try {
+        response = await (libraryFetch || fetch)(`${LIBRARY}${address}`, { headers: { Accept: 'text/html' }, signal: AbortSignal.timeout(12000) });
+    } catch {
+        throw new OllamaError('LIBRARY_UNREACHABLE');
+    }
+    if (!response.ok) throw new OllamaError('LIBRARY_UNREACHABLE');
+    const html = await response.text();
+    if (libraryCache.size >= 400) libraryCache.delete(libraryCache.keys().next().value);
+    libraryCache.set(address, { html, until: Date.now() + LIBRARY_KEEP_MS });
+    return html;
+};
+
+const plainText = (html) => html.replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').trim();
+
+// "12b" is 12 billion parameters, "270m" is 0.27, "e4b" is 4 and "8x7b" is eight experts of 7.
+export const parseParameters = (size) => {
+    const several = String(size).match(/^(\d+)x(\d+(?:\.\d+)?)b$/);
+    if (several) return Number(several[1]) * Number(several[2]);
+    const single = String(size).match(/^e?(\d+(?:\.\d+)?)([bm])$/);
+    return single ? Number(single[1]) / (single[2] === 'm' ? 1000 : 1) : null;
+};
+
+export const parseLibrary = (html) => {
+    const seen = new Set();
+    return String(html).split(/<a\s[^>]*?href="\/library\//).slice(1).map((block) => {
+        const name = block.match(/^([a-z0-9][a-z0-9._-]*)"/i)?.[1];
+        if (!name || seen.has(name)) return null;
+        seen.add(name);
+        const body = block.split('</a>')[0];
+        const words = [...body.matchAll(/<span[^>]*>\s*([^<>]{1,24}?)\s*<\/span>/g)].map((match) => match[1].trim());
+        return {
+            name,
+            description: plainText(body.match(/<p[^>]*>([\s\S]*?)<\/p>/)?.[1] || ''),
+            capabilities: [...new Set(words.filter((word) => LIBRARY_ABILITIES.has(word)))],
+            sizes: [...new Set(words.filter((word) => parseParameters(word) !== null))],
+            pulls: Number((body.match(/title="([\d,]+) downloads"/)?.[1] || '').replace(/,/g, '')) || 0,
+            updated: body.match(/title="Updated ([^"]+)"/)?.[1] || null
+        };
+    }).filter(Boolean);
+};
+
+// The size on disk of each tag of one model, in megabytes.
+export const parseLibrarySizes = (html) => {
+    const sizes = new Map();
+    for (const match of String(html).matchAll(/href="\/library\/[^":]+:([^"]+)"([\s\S]{0,3000}?)<\/a>/g)) {
+        if (sizes.has(match[1])) continue;
+        const size = plainText(match[2]).match(/([\d.]+)\s*(GB|MB)\b/);
+        if (size) sizes.set(match[1], Math.round(Number(size[1]) * (size[2] === 'GB' ? 1024 : 1)));
+    }
+    return sizes;
+};
+
+export const librarySizes = async (name) => {
+    try {
+        return parseLibrarySizes(await libraryPage(`/library/${encodeURIComponent(name)}/tags`));
+    } catch {
+        return new Map();
+    }
+};
+
+const purposesOf = (model) => {
+    if (model.capabilities.includes('embedding')) return ['embedding'];
+    const text = `${model.name} ${model.description}`.toLowerCase();
+    const purposes = ['chat', 'writing'];
+    if (/\bcod(?:e|er|ing)\b|program/.test(text)) purposes.push('code');
+    if (model.capabilities.includes('thinking') || /reason/.test(text)) purposes.push('reasoning');
+    return purposes;
+};
+
+// One entry for each size of each model, in the shape the fit and ranking work on.
+export const libraryCatalogue = async (query = '', page = 1) => {
+    const params = new URLSearchParams();
+    if (query) params.set('q', query);
+    if (page > 1) params.set('page', String(page));
+    const html = await libraryPage(`/search${params.size > 0 ? `?${params}` : ''}`);
+    const models = parseLibrary(html).filter((model) => model.sizes.length > 0 || !model.capabilities.includes('cloud'));
+    if (models.length === 0 && !query && page === 1) throw new OllamaError('LIBRARY_UNREADABLE');
+    const exact = await Promise.all(models.map((model) => librarySizes(model.name)));
+
+    const entries = models.flatMap((model, index) => (model.sizes.length > 0 ? model.sizes : ['latest']).map((size) => {
+        const known = exact[index].get(size) || null;
+        const parameters = parseParameters(size) ?? (known ? Math.round((known / MB_PER_BILLION) * 10) / 10 : 0);
+        return {
+            tag: `${model.name}:${size}`,
+            name: `${model.name}:${size}`,
+            description: model.description,
+            goodFor: purposesOf(model),
+            parameters,
+            sizeMb: known || Math.round(parameters * MB_PER_BILLION),
+            sizeEstimated: !known,
+            moe: /^\d+x/.test(size) || /mixture.of.experts|\bmoe\b/i.test(model.description),
+            capabilities: model.capabilities.filter((ability) => ability !== 'cloud'),
+            pulls: model.pulls,
+            updated: model.updated
+        };
+    })).filter((entry) => entry.sizeMb > 0);
+    return { entries, more: html.includes(`page=${page + 1}`) };
 };
 
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;

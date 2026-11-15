@@ -11,14 +11,19 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, createOllamaClient, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
+    OllamaError, mapOllamaError, createOllamaClient, libraryCatalogue, librarySizes, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway
 } from '../middleware/ai.middleware.js';
 
 const MB = 1024 * 1024;
-const catalogue = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'config', 'ai.catalogue.json'), 'utf8'));
-const catalogueByTag = new Map(catalogue.map((entry) => [entry.tag, entry]));
+// Models seen in the live list from ollama.com, remembered so installed models can show their description and size.
+const knownModels = new Map();
+const liveCatalogue = async (query) => {
+    const found = await libraryCatalogue(String(query?.q || ''), Number(query?.page) || 1);
+    found.entries.forEach((entry) => knownModels.set(entry.tag, entry));
+    return { ...found, query: String(query?.q || ''), page: Number(query?.page) || 1 };
+};
 
 const canManage = (req) => hasRight(req.user.roles, RIGHTS.MANAGE_MODELS);
 
@@ -779,7 +784,7 @@ const describeInstalled = async (ollama, model, personalByName) => {
     } catch {
         shown = null;
     }
-    const known = catalogueByTag.get(model.name);
+    const known = knownModels.get(model.name);
     const personal = personalByName.get(model.name) || personalByName.get(model.name.replace(/:latest$/, ''));
 
     return {
@@ -829,7 +834,7 @@ export const listModels = asyncHandler(async (req, res) => {
         loaded = new Set();
     }
     for (const model of models) {
-        const fit = fitModel(catalogueByTag.get(model.name) || { sizeMb: model.sizeBytes / MB, parameters: parseFloat(model.parameterSize) || 0 }, hardware);
+        const fit = fitModel(knownModels.get(model.name) || { sizeMb: model.sizeBytes / MB, parameters: parseFloat(model.parameterSize) || 0 }, hardware);
         model.fit = { verdict: fit.verdict, label: fit.label, fits: fit.fits };
         model.ready = loaded.has(model.name);
         model.canChat = !model.capabilities.includes('embedding') || model.capabilities.includes('completion');
@@ -864,7 +869,7 @@ export const listRunning = asyncHandler(async (req, res) => {
                 const gpuPercent = size > 0 ? Math.min(100, Math.round((onGpu / size) * 100)) : 0;
                 return {
                     name: model.name,
-                    displayName: catalogueByTag.get(model.name)?.name || model.name,
+                    displayName: knownModels.get(model.name)?.name || model.name,
                     sizeBytes: size,
                     gpuBytes: onGpu,
                     gpuPercent,
@@ -986,7 +991,7 @@ export const updateModel = asyncHandler(async (req, res) => {
 });
 
 export const startDownload = asyncHandler(async (req, res) => {
-    const known = catalogueByTag.get(req.body.name);
+    const known = knownModels.get(req.body.name);
     try {
         if (known) {
             const hardware = effectiveHardware(await getCurrentDevice());
@@ -1000,7 +1005,7 @@ export const startDownload = asyncHandler(async (req, res) => {
         const job = await downloads.enqueue({
             model: req.body.name,
             userId: req.user.id,
-            sizeHintMb: known?.sizeMb || null
+            sizeHintMb: known?.sizeMb || (await librarySizes(String(req.body.name).split(':')[0])).get(String(req.body.name).split(':')[1] || 'latest') || null
         });
         res.status(202).json({ success: true, download: job });
     } catch (error) {
@@ -1057,9 +1062,20 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
     const { memoryMb, gpuMemoryMb } = req.query;
     const hasSpecs = memoryMb !== undefined;
     const hardware = { memoryMb: Number(memoryMb) || 0, gpuMemoryMb: Number(gpuMemoryMb) || 0 };
+    let live;
+    try {
+        live = await liveCatalogue(req.query);
+    } catch (error) {
+        return sendOllamaError(res, error);
+    }
+    const catalogue = live.entries;
 
     res.status(200).json({
         success: true,
+        source: 'ollama.com',
+        query: live.query,
+        page: live.page,
+        more: live.more,
         hardware: hasSpecs ? hardware : null,
         reserved: { gpuMemoryMb: GPU_HEADROOM_MB, memoryMb: RAM_RESERVE_MB },
         notes: hasSpecs ? fitNotes(catalogue, hardware) : [],
@@ -1074,14 +1090,24 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
     }
     deviceScope.enterWith(targetOf(device));
     const hardware = effectiveHardware(device);
+    let live;
+    try {
+        live = await liveCatalogue(req.query);
+    } catch (error) {
+        return sendOllamaError(res, error);
+    }
     const installed = await installedNames();
     const disk = await diskNow();
 
     res.status(200).json({
         success: true,
+        source: 'ollama.com',
+        query: live.query,
+        page: live.page,
+        more: live.more,
         hardware,
         freeDiskMb: disk.diskFreeMb,
-        models: rankCatalogue(catalogue, hardware).map((entry) => ({
+        models: rankCatalogue(live.entries, hardware).map((entry) => ({
             ...entry,
             installed: installed.has(entry.tag),
             fitsDisk: disk.diskFreeMb === null ? true : entry.sizeMb <= disk.diskFreeMb

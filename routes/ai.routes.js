@@ -85,7 +85,7 @@ router.get('/models/downloads/stream', ...signedIn, aiController.streamDownloads
 router.post('/models/downloads/cancel', ...manager, validateRequest(modelSchemas.downloadAction), aiController.changeDownload);
 
 router.get('/catalogue', noCacheResponse(), validateRequest(modelSchemas.catalogueQuery, 'query'), aiController.getPublicCatalogue);
-router.get('/devices/:id/catalogue', ...signedIn, withDeviceId, aiController.getDeviceCatalogue);
+router.get('/devices/:id/catalogue', ...signedIn, withDeviceId, validateRequest(modelSchemas.catalogueQuery, 'query'), aiController.getDeviceCatalogue);
 
 const withChatId = validateRequest(chatSchemas.chatId, 'params');
 
