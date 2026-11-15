@@ -815,6 +815,7 @@ export const listModels = asyncHandler(async (req, res) => {
             success: true,
             ollamaAvailable: false,
             ollamaVersion: null,
+            webSearch: webSearchReady(),
             models: [],
             disk: { usedByModelsMb: 0, freeMb: disk.diskFreeMb, totalMb: disk.diskTotalMb },
             permissions: { manage: canManage(req) }
@@ -1295,7 +1296,7 @@ const TOUCH_EVERY = 4;
 export const REVIEW_GUIDE = searchGuide.part('SEARCH REVIEW');
 
 export const listSkills = asyncHandler(async (req, res) => {
-    res.status(200).json({ success: true, skills: SKILLS.map(({ id, name, description, default: on, credit }) => ({ id, name, description, default: on, credit })) });
+    res.status(200).json({ success: true, webSearch: webSearchReady(), skills: SKILLS.map(({ id, name, description, default: on, credit }) => ({ id, name, description, default: on, credit })) });
 });
 
 const MAX_PROMPTS = 100;
