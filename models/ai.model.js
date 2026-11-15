@@ -183,7 +183,8 @@ export const modelSchemas = {
         gpuMemoryMb: megabytes,
         q: Joi.string().trim().max(60).allow(''),
         page: Joi.number().integer().min(1).max(50),
-        all: Joi.boolean()
+        all: Joi.boolean(),
+        sample: Joi.boolean()
     })
 };
 

@@ -619,7 +619,7 @@ export const fitNotes = (catalogue, hardware) => {
     if (gpuMemoryMb === 0) notes.push('No graphics card: models run on the processor, which is slower. More system memory lets larger models run.');
     const medium = catalogue.filter((entry) => entry.parameters >= 7 && entry.parameters <= 9).map(memoryNeededMb).sort((a, b) => a - b);
     if (medium.length > 1 && medium[0] + medium[1] <= usableGpu) notes.push('This graphics card has room for two 7 to 8B models at once, for example one for chat and one for code.');
-    if (verdicts.some(({ entry, verdict }) => entry.moe && verdict === 'mixed')) notes.push('A large mixture-of-experts model runs here with help from system memory, so system memory matters as much as graphics memory for it.');
+    if (verdicts.some(({ entry, verdict }) => entry.moe && verdict === 'mixed')) notes.push('A large mixture-of-experts model runs here with help from system memory, so system memory matters as much as graphics memory.');
     if (verdicts.every(({ verdict }) => verdict === 'too_large')) notes.push('None of the listed models fits this device. A smaller model not on this list may still run, slowly.');
     return notes;
 };

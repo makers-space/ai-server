@@ -19,7 +19,15 @@ import {
 const MB = 1024 * 1024;
 // Models seen in the live list from ollama.com, remembered so installed models can show their description and size.
 const knownModels = new Map();
+const hostName = (address) => {
+    try {
+        return new URL(address).hostname.replace(/^www\./, '');
+    } catch {
+        return 'Source';
+    }
+};
 const CATALOGUE_PAGE = 48;
+const SAMPLE = { full: 6, mixed: 3, large: 3 };
 const POPULAR_MODELS = 40;
 const PICK_ORDER = { fast: 0, balanced: 1, best: 2 };
 const CLOUD_FIT = { verdict: 'cloud', label: 'Cloud only', fits: false, memoryNeededMb: 0, tokensPerSecond: null };
@@ -46,7 +54,22 @@ const liveCatalogue = async (query, hardware) => {
             || a.parameters - b.parameters);
     };
     const everything = query?.all === true || query?.all === 'true';
-    const shown = (all) => (everything ? all : all.slice((page - 1) * CATALOGUE_PAGE, page * CATALOGUE_PAGE));
+    // The public home page shows a taste of the list: models that run fully here, some that need help from system memory, and a few that are too large.
+    const sampled = Boolean(hardware) && (query?.sample === true || query?.sample === 'true');
+    const dice = Math.random();
+    const sample = (all) => {
+        const local = all.filter((entry) => !entry.cloudOnly);
+        const large = local.filter((entry) => entry.fit.verdict === 'too_large');
+        const start = Math.floor(dice * large.length);
+        const step = Math.max(1, Math.floor(large.length / SAMPLE.large));
+        const picked = [...new Set(Array.from({ length: Math.min(SAMPLE.large, large.length) }, (_, index) => large[(start + index * step) % large.length]))];
+        return [
+            ...local.filter((entry) => entry.fit.verdict === 'gpu' || entry.fit.verdict === 'cpu').slice(0, SAMPLE.full),
+            ...local.filter((entry) => entry.fit.verdict === 'mixed').slice(0, SAMPLE.mixed),
+            ...picked
+        ];
+    };
+    const shown = (all) => (sampled ? sample(all) : everything ? all : all.slice((page - 1) * CATALOGUE_PAGE, page * CATALOGUE_PAGE));
 
     // The page about to be shown gets its exact sizes, then the order is worked out again with them.
     await loadLibrarySizes(shown(order()).map((entry) => entry.tag.split(':')[0]));
@@ -60,7 +83,7 @@ const liveCatalogue = async (query, hardware) => {
         entries,
         query: words.join(' '),
         page,
-        more: !everything && page * CATALOGUE_PAGE < all.length,
+        more: !everything && !sampled && page * CATALOGUE_PAGE < all.length,
         local: all.filter((entry) => !entry.cloudOnly),
         total: all.length,
         library: models.length,
@@ -1755,6 +1778,7 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
     const openedPages = new Set();
 
     const sections = [];
+    const sources = [];
     const note = (tool, input) => {
         const step = { tool, input, failed: null };
         steps.push(step);
@@ -1792,7 +1816,7 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
                 const address = opened[index].url;
                 // The model is told when a page gave no text, so it does not fill the gap from memory.
                 if (search.types.length === 0 && (outcome.status !== 'fulfilled' || !(outcome.value.content || '').trim())) {
-                    lines.push(`The text of ${address} could not be read.`);
+                    lines.push(`Found ${address} (its text was not loaded).`);
                 }
                 if (outcome.status !== 'fulfilled') return;
                 const page = outcome.value;
@@ -1827,8 +1851,11 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
             lines.push(`Files found (${search.types.join(', ')}; each one was loaded successfully; use these in src):`);
             lines.push(...(files.length > 0 ? files.slice(0, FILES_PER_SEARCH).map((file) => `- ${file.url} (${file.type})`) : ['- none']));
         }
-        if (search.types.length === 0 && !lines.some((line) => line.startsWith('Text of '))) lines.push('No page text could be read for this search. Do not write its content from memory: tell the user it could not be read, and give them the links below.');
-        lines.push('Pages (web pages, never for src; give as plain links):', ...pagesSeen.slice(0, 3).map((result) => `- ${clip(result.title, 100)} | ${result.url} | ${clip(result.content, 160).replace(/\s+/g, ' ')}`));
+        if (search.types.length === 0 && !lines.some((line) => line.startsWith('Text of '))) lines.push('The pages below are the result of this search. Their text was not loaded, so give the pages themselves to the user as links. Do not say that nothing was found, and do not write their content from memory.');
+        if (search.types.length === 0) {
+            pagesSeen.slice(0, 2).filter((page) => !sources.some((known) => known.url === page.url)).forEach((page) => sources.push({ title: page.title, url: page.url }));
+        }
+        lines.push('Pages (web pages, never for src; give as links, [title](address)):', ...pagesSeen.slice(0, 3).map((result) => `- ${clip(result.title, 100)} | ${result.url} | ${clip(result.content, 160).replace(/\s+/g, ' ')}`));
         sections.push(lines.join('\n'));
     };
     const runPage = async (target) => {
@@ -1907,7 +1934,7 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
         for (const page of pages) await runPage(page);
         idle = gained() > before ? 0 : idle + 1;
     }
-    return { known, usable, text: sections.length > 0 ? `WEB RESULTS\n\n${resultsText()}` : '' };
+    return { known, usable, sources, text: sections.length > 0 ? `WEB RESULTS\n\n${resultsText()}` : '' };
 };
 
 const runTurn = async ({ chat, body, userId, res, live }) => {
@@ -2120,6 +2147,13 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
             tokensPerSecond: evalSeconds > 0 && evalCount ? Math.round((evalCount / evalSeconds) * 10) / 10 : null
         };
         if (gone) reply.stopped = true;
+        // The pages a web answer rests on are always given to the user: when the model left them out, they are added.
+        if (found?.sources?.length > 0 && reply.content && !gone && !found.sources.some((page) => reply.content.includes(page.url))) {
+            const listed = found.sources.slice(0, 3).map((page) => `- [${clip(page.title, 100).replace(/[\[\]]/g, '') || hostName(page.url)}](${page.url})`);
+            const added = `\n\nSources:\n${listed.join('\n')}`;
+            reply.content += added;
+            write({ type: 'token', text: added });
+        }
         if (found) {
             const used = [...reply.content.matchAll(/\bsrc\s*=\s*"(https?:\/\/[^"]+)"/g)].map((match) => match[1]);
             reply.unverified = [...new Set(used.filter((address) => !found.usable.has(address)))];
