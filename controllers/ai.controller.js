@@ -22,6 +22,7 @@ const knownModels = new Map();
 const CATALOGUE_PAGE = 48;
 const POPULAR_MODELS = 40;
 const PICK_ORDER = { fast: 0, balanced: 1, best: 2 };
+const CLOUD_FIT = { verdict: 'cloud', label: 'Cloud only', fits: false, memoryNeededMb: 0, tokensPerSecond: null };
 // The whole library, searched and ordered on the server and handed out a page at a time.
 // Recommendations come only from the most downloaded models, so an obscure model is never the suggestion.
 const liveCatalogue = async (query, hardware) => {
@@ -34,16 +35,18 @@ const liveCatalogue = async (query, hardware) => {
 
     const order = () => {
         const entries = libraryEntries(matching);
-        const isPopular = (entry) => popular.has(entry.tag.split(':')[0]);
+        const isPopular = (entry) => !entry.cloudOnly && popular.has(entry.tag.split(':')[0]);
         const all = hardware
-            ? [...rankCatalogue(entries.filter(isPopular), hardware), ...entries.filter((entry) => !isPopular(entry)).map((entry) => ({ ...entry, fit: fitModel(entry, hardware), pick: null }))]
+            ? [...rankCatalogue(entries.filter(isPopular), hardware), ...entries.filter((entry) => !isPopular(entry)).map((entry) => ({ ...entry, fit: entry.cloudOnly ? CLOUD_FIT : fitModel(entry, hardware), pick: null }))]
             : entries.map((entry) => ({ ...entry, fit: null, pick: null }));
         return all.sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
+            || Number(a.cloudOnly) - Number(b.cloudOnly)
             || Number(b.fit?.fits ?? true) - Number(a.fit?.fits ?? true)
             || b.pulls - a.pulls
             || a.parameters - b.parameters);
     };
-    const shown = (all) => all.slice((page - 1) * CATALOGUE_PAGE, page * CATALOGUE_PAGE);
+    const everything = query?.all === true || query?.all === 'true';
+    const shown = (all) => (everything ? all : all.slice((page - 1) * CATALOGUE_PAGE, page * CATALOGUE_PAGE));
 
     // The page about to be shown gets its exact sizes, then the order is worked out again with them.
     await loadLibrarySizes(shown(order()).map((entry) => entry.tag.split(':')[0]));
@@ -57,7 +60,8 @@ const liveCatalogue = async (query, hardware) => {
         entries,
         query: words.join(' '),
         page,
-        more: page * CATALOGUE_PAGE < all.length,
+        more: !everything && page * CATALOGUE_PAGE < all.length,
+        local: all.filter((entry) => !entry.cloudOnly),
         total: all.length,
         library: models.length,
         fitting: hardware ? all.filter((entry) => entry.fit.fits).length : null
@@ -1031,8 +1035,24 @@ export const updateModel = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, model: { name: record.name, displayName, basedOn: from, system, parameters } });
 });
 
+// One model looked up in the library by its Ollama name, with its exact size, whether or not the list was opened first.
+const findModel = async (tag) => {
+    if (knownModels.has(tag)) return knownModels.get(tag);
+    try {
+        const base = String(tag).split(':')[0];
+        const model = (await libraryModels()).find((entry) => entry.name === base);
+        if (!model) return null;
+        await loadLibrarySizes([base]);
+        const found = libraryEntries([model]).find((entry) => entry.tag === tag && !entry.cloudOnly) || null;
+        if (found) knownModels.set(tag, found);
+        return found;
+    } catch {
+        return null;
+    }
+};
+
 export const startDownload = asyncHandler(async (req, res) => {
-    const known = knownModels.get(req.body.name);
+    const known = await findModel(req.body.name);
     try {
         if (known) {
             const hardware = effectiveHardware(await getCurrentDevice());
@@ -1121,7 +1141,7 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
         fitting: live.fitting,
         hardware: hasSpecs ? hardware : null,
         reserved: { gpuMemoryMb: GPU_HEADROOM_MB, memoryMb: RAM_RESERVE_MB },
-        notes: hasSpecs ? fitNotes(live.all, hardware) : [],
+        notes: hasSpecs ? fitNotes(live.local, hardware) : [],
         models: live.entries
     });
 });

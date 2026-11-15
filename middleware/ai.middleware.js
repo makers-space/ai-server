@@ -1140,14 +1140,16 @@ const purposesOf = (model) => {
 };
 
 // One entry for each size of each model, in the shape the fit and ranking work on. A size not read yet is estimated.
+// A model with no size to download runs only on Ollama's own servers: it is listed, marked as such, and cannot be downloaded.
 export const libraryEntries = (models) => models
-    .filter((model) => model.sizes.length > 0 || !model.capabilities.includes('cloud'))
     .flatMap((model) => (model.sizes.length > 0 ? model.sizes : ['latest']).map((size) => {
+        const cloudOnly = model.sizes.length === 0 && model.capabilities.includes('cloud');
         const known = librarySizeCache.get(model.name)?.sizes.get(size) || null;
         const parameters = parseParameters(size) ?? (known ? Math.round((known / MB_PER_BILLION) * 10) / 10 : 0);
-        const tag = `${model.name}:${size}`;
+        const tag = cloudOnly ? model.name : `${model.name}:${size}`;
         return {
             tag,
+            cloudOnly,
             name: friendlyName(tag),
             description: model.description,
             goodFor: purposesOf(model),
@@ -1160,7 +1162,7 @@ export const libraryEntries = (models) => models
             updated: model.updated
         };
     }))
-    .filter((entry) => entry.sizeMb > 0);
+    .filter((entry) => entry.sizeMb > 0 || entry.cloudOnly);
 
 const MAX_PAGE_BYTES = 2 * 1024 * 1024;
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
