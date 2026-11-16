@@ -1145,7 +1145,7 @@ const installedNames = async () => {
 export const getPublicCatalogue = asyncHandler(async (req, res) => {
     const { memoryMb, gpuMemoryMb } = req.query;
     const hasSpecs = memoryMb !== undefined;
-    const hardware = { memoryMb: Number(memoryMb) || 0, gpuMemoryMb: Number(gpuMemoryMb) || 0 };
+    const hardware = { memoryMb: Number(memoryMb) || 0, gpuMemoryMb: Number(gpuMemoryMb) || 0, gpuShared: req.query.shared === true || req.query.shared === 'true' };
     let live;
     try {
         live = await liveCatalogue(req.query, hasSpecs ? hardware : null);
@@ -2248,6 +2248,20 @@ export const sendMessage = asyncHandler(async (req, res) => {
 
 const RECENT_DOWNLOAD_MS = 2 * 60 * 1000;
 
+// Where a reply being written has got to, worked out from what it has sent so far.
+const replyProgress = (live) => {
+    const events = live?.events || [];
+    const words = events.filter((event) => event.type === 'token').map((event) => event.text).join('').split(/\s+/).filter(Boolean).length;
+    if (words > 0) return { phase: 'writing', words };
+    const started = events.some((event) => event.type === 'start');
+    const queued = [...events].reverse().find((event) => event.type === 'queued');
+    if (!started && queued?.ahead > 0) return { phase: 'waiting', words: 0, ahead: queued.ahead };
+    if (events.some((event) => event.type === 'thinking')) return { phase: 'thinking', words: 0 };
+    const tool = [...events].reverse().find((event) => event.type === 'tool');
+    if (tool) return { phase: tool.tool === 'web_fetch' ? 'reading' : 'searching', words: 0 };
+    return { phase: 'starting', words: 0 };
+};
+
 export const getActivity = asyncHandler(async (req, res) => {
     const ids = [...liveReplies.keys()];
     const chats = ids.length > 0
@@ -2257,7 +2271,7 @@ export const getActivity = asyncHandler(async (req, res) => {
         || (['completed', 'failed'].includes(job.status) && job.finishedAt && Date.now() - new Date(job.finishedAt).getTime() < RECENT_DOWNLOAD_MS));
     res.status(200).json({
         success: true,
-        replies: chats.map((chat) => ({ chatId: chat.id, title: chat.title, model: chat.model, waiting: (queuedTurns.get(chat.id) || []).length })),
+        replies: chats.map((chat) => ({ chatId: chat.id, title: chat.title, model: chat.model, waiting: (queuedTurns.get(chat.id) || []).length, ...replyProgress(liveReplies.get(chat.id)) })),
         downloads: jobs.map((job) => ({ id: job.id, model: job.model, status: job.status, percent: job.percent })),
         permissions: { manage: canManage(req) }
     });

@@ -594,7 +594,8 @@ export const fitModel = (entry, hardware) => {
     const memoryMb = Number(hardware?.memoryMb) || 0;
     const hasGpu = gpuMemoryMb > 0;
     const usableGpu = hasGpu ? Math.max(0, gpuMemoryMb - GPU_HEADROOM_MB) : 0;
-    const usableRam = Math.max(0, memoryMb - RAM_RESERVE_MB);
+    // On a chip whose graphics share the system memory, the graphics part is not counted a second time.
+    const usableRam = Math.max(0, memoryMb - (hardware?.gpuShared ? gpuMemoryMb : 0) - RAM_RESERVE_MB);
     const needed = memoryNeededMb(entry);
 
     let verdict = 'too_large';
