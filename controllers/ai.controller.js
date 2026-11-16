@@ -93,6 +93,20 @@ const liveCatalogue = async (query, hardware) => {
 
 const canManage = (req) => hasRight(req.user.roles, RIGHTS.MANAGE_MODELS);
 
+// Once a change has been answered successfully, the person's other open apps are told, so their pages bring themselves
+// up to date. The first part of the path, when it is an id, says which chat or computer changed.
+export const announceChanges = (type) => (req, res, next) => {
+    // The path is read now: by the time the answer has gone out it no longer starts where this part of the router does.
+    const path = req.path;
+    res.on('finish', () => {
+        if (req.method === 'GET' || res.statusCode >= 300 || !req.user?.id) return;
+        const id = path.match(/^\/([0-9a-f]{24})(?:\/|$)/)?.[1] || null;
+        const removed = req.method === 'DELETE' && /^\/[0-9a-f]{24}\/?$/.test(path);
+        getNotificationService().sendToUser(String(req.user.id), { type, data: { id, removed } });
+    });
+    next();
+};
+
 const sendOllamaError = (res, error) => {
     if (!(error instanceof OllamaError)) throw error;
     const body = { success: false, ...error.toJSON() };
@@ -2264,6 +2278,7 @@ const takeTurns = async (chat, body, userId, res) => {
                 if (!listener.writableEnded) listener.end();
             }
             getNotificationService().sendToUser(String(userId), { type: 'chat:reply', data: { chatId: id, seq: turn.live.seq + 1, event: { type: 'end' } } });
+            getNotificationService().sendToUser(String(userId), { type: 'chat:changed', data: { id, removed: false } });
             const content = queuedTurns.get(id)?.shift();
             if (content === undefined) break;
             const live = openLive(id);

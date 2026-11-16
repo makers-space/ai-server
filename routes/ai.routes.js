@@ -58,6 +58,10 @@ const signedIn = [aiController.requireDatabase, authMiddleware.verifyToken(), au
 const manager = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.MANAGE_MODELS), noCacheResponse(), aiController.useDevice];
 const withDeviceId = validateRequest(deviceSchemas.deviceId, 'params');
 
+router.use('/devices', aiController.announceChanges('device:changed'));
+router.use('/models', aiController.announceChanges('models:changed'));
+router.use('/chats', aiController.announceChanges('chat:changed'));
+
 router.get('/devices', ...signedIn, aiController.listDevices);
 router.post('/devices/link', ...signedIn, validateRequest(deviceSchemas.link), aiController.linkDevice);
 router.delete('/devices/:id', ...signedIn, withDeviceId, aiController.unlinkDevice);
