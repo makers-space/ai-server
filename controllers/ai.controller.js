@@ -107,6 +107,8 @@ export const announceChanges = (type) => (req, res, next) => {
     next();
 };
 
+const RESUME_WINDOW_MS = 30 * 60 * 1000;
+
 const sendOllamaError = (res, error) => {
     if (!(error instanceof OllamaError)) throw error;
     const body = { success: false, ...error.toJSON() };
@@ -539,6 +541,31 @@ class DownloadManager extends EventEmitter {
         });
     }
 
+    // A download that failed because its computer dropped off the connection is taken up again when that computer
+    // returns. Ollama keeps what was already fetched, so it carries on from there.
+    async resumeFor(deviceId) {
+        const waiting = await Download.find({
+            service: SERVICE,
+            device: deviceId,
+            status: 'failed',
+            errorCode: { $in: ['DEVICE_OFFLINE', 'DOWNLOAD_INTERRUPTED'] },
+            finishedAt: { $gte: new Date(Date.now() - RESUME_WINDOW_MS) }
+        });
+        if (waiting.length === 0) return 0;
+        for (const doc of waiting) {
+            this.live.delete(doc.id);
+            doc.status = 'queued';
+            doc.errorCode = null;
+            doc.finishedAt = null;
+            await doc.save();
+            this.announce(doc);
+        }
+        logger.info(`[Downloads] Resuming ${waiting.length} download(s) on a computer that came back`, { deviceId: String(deviceId) });
+        getNotificationService().broadcast('activity:changed');
+        this.next();
+        return waiting.length;
+    }
+
     async recover() {
         const interrupted = await Download.updateMany(
             { service: SERVICE, status: 'downloading' },
@@ -817,6 +844,9 @@ const announceDevice = (online) => async (deviceId) => {
     }
 };
 deviceGateway.on('online', announceDevice(true));
+deviceGateway.on('online', (deviceId) => {
+    downloads.resumeFor(deviceId).catch((error) => logger.warn('[Downloads] Could not resume downloads for a returning computer', { deviceId: String(deviceId), error: error.message }));
+});
 deviceGateway.on('offline', announceDevice(false));
 // Signing out of the desktop app takes that computer off the account.
 deviceGateway.on('goodbye', async (deviceId) => {
@@ -896,10 +926,21 @@ const contextLength = (shown) => {
     return key ? info[key] : null;
 };
 
+// A model's details only change when the model itself does, so they are asked for once per computer and version.
+const shownModels = new Map();
+const showOnce = async (ollama, model) => {
+    const key = `${currentLane()}|${model.name}|${model.digest || model.modified_at || ''}`;
+    if (shownModels.has(key)) return shownModels.get(key);
+    const shown = await ollama.show(model.name);
+    if (shownModels.size >= 500) shownModels.delete(shownModels.keys().next().value);
+    shownModels.set(key, shown);
+    return shown;
+};
+
 const describeInstalled = async (ollama, model, personalByName) => {
     let shown = null;
     try {
-        shown = await ollama.show(model.name);
+        shown = await showOnce(ollama, model);
     } catch {
         shown = null;
     }
