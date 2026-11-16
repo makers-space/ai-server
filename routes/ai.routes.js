@@ -13,6 +13,8 @@ router.validRoutes = [
     '/api/v1/devices/:id',
     '/api/v1/devices/:id/detect',
     '/api/v1/devices/link',
+    '/api/v1/devices/:id/pause',
+    '/api/v1/devices/:id/resume',
     '/api/v1/settings',
     '/api/v1/settings/test-connection',
     '/api/v1/setup/status',
@@ -35,6 +37,7 @@ router.validRoutes = [
     '/api/v1/chats/:id',
     '/api/v1/chats/:id/messages',
     '/api/v1/chats/:id/reply',
+    '/api/v1/chats/:id/live',
     '/api/v1/chats/:id/stop',
     '/api/v1/chats/:id/summary',
     '/api/v1/chats/:id/attachments',
@@ -61,6 +64,8 @@ router.delete('/devices/:id', ...signedIn, withDeviceId, aiController.unlinkDevi
 router.get('/devices/:id', ...signedIn, withDeviceId, aiController.getDevice);
 router.put('/devices/:id', ...manager, withDeviceId, validateRequest(deviceSchemas.updateDevice), aiController.updateDevice);
 router.post('/devices/:id/detect', ...manager, withDeviceId, aiController.detectDevice);
+router.post('/devices/:id/pause', ...signedIn, withDeviceId, aiController.pauseDevice);
+router.post('/devices/:id/resume', ...signedIn, withDeviceId, aiController.resumeDevice);
 
 router.get('/settings', ...signedIn, aiController.readSettings);
 router.put('/settings', ...manager, validateRequest(deviceSchemas.updateSettings), aiController.updateSettings);
@@ -97,6 +102,7 @@ router.patch('/chats/:id', ...signedIn, withChatId, validateRequest(chatSchemas.
 router.delete('/chats/:id', ...signedIn, withChatId, aiController.deleteChat);
 router.post('/chats/:id/messages', ...signedIn, withChatId, validateRequest(chatSchemas.send), aiController.sendMessage);
 router.get('/chats/:id/reply', ...signedIn, withChatId, aiController.rejoinReply);
+router.get('/chats/:id/live', ...signedIn, withChatId, aiController.liveReply);
 router.post('/chats/:id/stop', ...signedIn, withChatId, aiController.stopReply);
 router.post('/chats/:id/summary', ...signedIn, withChatId, aiController.summariseChat);
 router.post('/chats/:id/attachments', ...signedIn, withChatId, aiController.receiveUpload, aiController.addAttachment);

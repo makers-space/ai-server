@@ -37,6 +37,7 @@ const deviceSchema = new mongoose.Schema({
     keyHash: { type: String, default: null, select: false },
     hardware: { type: hardwareSchema, default: null },
     overrides: { type: overridesSchema, default: () => ({}) },
+    paused: { type: Boolean, default: false },
     lastSeenAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
@@ -327,6 +328,7 @@ export const chatSchemas = {
     send: Joi.object({
         content: Joi.string().min(1).max(100000),
         regenerate: Joi.boolean(),
+        live: Joi.boolean(),
         editIndex: Joi.number().integer().min(0).max(199)
     }).or('content', 'regenerate').without('regenerate', ['content', 'editIndex']).with('editIndex', 'content'),
     attachUpload: Joi.object({ name: Joi.string().trim().min(1).max(255).required() }),

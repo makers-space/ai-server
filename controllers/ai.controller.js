@@ -128,7 +128,18 @@ const DEVICE_HOST = 'http://device.mollama';
 // A hosted server has no Ollama of its own, so in production its computer is not a device unless asked for.
 const localEnabled = () => (process.env.LOCAL_DEVICE ? process.env.LOCAL_DEVICE === 'true' : process.env.NODE_ENV !== 'production');
 const currentTarget = () => deviceScope.getStore() || (localEnabled() ? LOCAL_TARGET : NO_TARGET);
-const targetOf = (device) => (device.kind === 'companion' ? { kind: 'companion', id: String(device.id) } : LOCAL_TARGET);
+// Paused computers stay connected but are given no work. The set follows the saved flag each time a computer is looked up.
+const pausedDevices = new Set();
+const targetOf = (device) => {
+    if (device.kind !== 'companion') return LOCAL_TARGET;
+    if (device.paused) pausedDevices.add(String(device.id));
+    else pausedDevices.delete(String(device.id));
+    return { kind: 'companion', id: String(device.id) };
+};
+const targetPaused = () => {
+    const target = currentTarget();
+    return target.kind === 'companion' && pausedDevices.has(target.id);
+};
 
 const currentLane = () => {
     const target = currentTarget();
@@ -137,6 +148,7 @@ const currentLane = () => {
 
 const getOllama = async () => {
     const target = currentTarget();
+    if (target.kind === 'companion' && pausedDevices.has(target.id)) return createOllamaClient(DEVICE_HOST, () => Promise.reject(new OllamaError('DEVICE_PAUSED')));
     if (target.kind === 'companion') return createOllamaClient(DEVICE_HOST, deviceGateway.fetcher(target.id));
     if (target.kind === 'none') return createOllamaClient(DEVICE_HOST, () => Promise.reject(new OllamaError('NO_DEVICE')));
     return createOllamaClient(await resolveOllamaHost());
@@ -609,7 +621,9 @@ const readOllama = async (client) => {
 
 const UNREACHED = { available: false, version: null, modelCount: 0 };
 const isOnline = (device) => device.kind === 'local' || deviceGateway.isOnline(device.id);
-const ollamaOf = (device) => (isOnline(device) ? deviceScope.run(targetOf(device), async () => readOllama(await getOllama())) : UNREACHED);
+const ollamaOf = (device) => (device.paused
+    ? { ...UNREACHED, paused: true }
+    : isOnline(device) ? deviceScope.run(targetOf(device), async () => readOllama(await getOllama())) : UNREACHED);
 const hashKey = (key) => crypto.createHash('sha256').update(String(key)).digest('hex');
 
 const ownDevices = (userId) => Device.find({ service: SERVICE, kind: 'companion', registeredBy: userId }).sort({ lastSeenAt: -1 });
@@ -629,7 +643,7 @@ const pickTarget = async (userId, wanted) => {
     }
     if (localEnabled()) return LOCAL_TARGET;
     const own = await ownDevices(userId);
-    const best = own.find((device) => deviceGateway.isOnline(device.id)) || own[0];
+    const best = own.find((device) => deviceGateway.isOnline(device.id) && !device.paused) || own.find((device) => deviceGateway.isOnline(device.id)) || own[0];
     return best ? targetOf(best) : NO_TARGET;
 };
 
@@ -647,6 +661,7 @@ const presentDevice = (device, ollama) => ({
     hardware: effectiveHardware(device),
     detected: device.hardware,
     overrides: device.overrides,
+    paused: Boolean(device.paused),
     edited: Object.values(device.overrides?.toObject?.() || device.overrides || {}).some((value) => value !== null && value !== ''),
     ollama
 });
@@ -741,6 +756,30 @@ export const unlinkDevice = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true });
 });
 
+// Pausing keeps the computer connected but gives it no work, and takes its loaded models out of memory first.
+const setPaused = (paused) => asyncHandler(async (req, res) => {
+    const device = await allowedDevice(req, req.params.id);
+    if (!device || device.kind !== 'companion') {
+        return res.status(404).json({ success: false, message: 'Device not found' });
+    }
+    if (paused && !device.paused && deviceGateway.isOnline(device.id)) {
+        await deviceScope.run(targetOf(device), async () => {
+            const ollama = await getOllama();
+            const { models } = await ollama.running();
+            await Promise.all(models.map((model) => ollama.unload(model.name)));
+        }).catch((error) => logger.warn('[Device] Models could not be unloaded before pausing', { deviceId: device.id, message: String(error?.message || '').slice(0, 200) }));
+    }
+    device.paused = paused;
+    await device.save();
+    targetOf(device);
+    getNotificationService().sendToUser(String(req.user.id), { type: 'device:changed', data: { deviceId: device.id, online: deviceGateway.isOnline(device.id), paused } });
+    logger.info(paused ? '[Device] Device paused' : '[Device] Device resumed', { deviceId: device.id, userId: req.user.id });
+
+    res.status(200).json({ success: true, device: presentDevice(device, await ollamaOf(device)) });
+});
+export const pauseDevice = setPaused(true);
+export const resumeDevice = setPaused(false);
+
 export const connectDevice = (ws) => deviceGateway.handleConnection(ws, async (hello) => {
     if (!mongoose.isValidObjectId(hello.deviceId) || typeof hello.key !== 'string') return null;
     const device = await Device.findOne({ _id: hello.deviceId, service: SERVICE, kind: 'companion' }).select('+keyHash');
@@ -808,7 +847,7 @@ export const getSetupStatus = asyncHandler(async (req, res) => {
     const device = await getCurrentDevice();
     const reachable = Boolean(device) && isOnline(device);
     const ollama = reachable ? await readOllama(await getOllama()) : UNREACHED;
-    const problem = !device ? 'NO_DEVICE' : !reachable ? 'DEVICE_OFFLINE' : 'OLLAMA_DOWN';
+    const problem = !device ? 'NO_DEVICE' : device.paused ? 'DEVICE_PAUSED' : !reachable ? 'DEVICE_OFFLINE' : 'OLLAMA_DOWN';
 
     // Any of the person's computers will do, so the others are asked before anything is called a problem.
     let ready = ollama.available ? device.id : null;
@@ -1960,7 +1999,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
     try {
         settings = await applyQueueSettings();
         ollama = await getOllama();
-        if (!(await ollama.status()).available) throw new OllamaError('OLLAMA_DOWN');
+        if (!(await ollama.status()).available) throw new OllamaError(targetPaused() ? 'DEVICE_PAUSED' : 'OLLAMA_DOWN');
         if (!chat.model) chat.model = await chooseModel(ollama, userId);
         facts = await modelFacts(ollama, chat.model);
 
@@ -1981,6 +2020,12 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
 
     await chat.save();
 
+    // Sent "live", the request only answers that the reply has started; its pieces go out on the person's live
+    // connection, so every app they have open follows the same reply.
+    if (res && body.live) {
+        res.status(202).json({ success: true, started: true });
+        res = null;
+    }
     if (res) {
         res.req.setTimeout(0);
         res.setTimeout(0);
@@ -2009,6 +2054,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         for (const listener of live.listeners) {
             if (!listener.writableEnded) listener.write(line);
         }
+        live.seq += 1;
+        getNotificationService().sendToUser(String(userId), { type: 'chat:reply', data: { chatId: chat.id, seq: live.seq, event } });
     };
     const reportPlace = () => {
         if (job?.state === 'waiting') write({ type: 'queued', ahead: job.ahead() });
@@ -2195,7 +2242,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
 };
 
 const openLive = (id) => {
-    const live = { events: [], listeners: new Set(), stop: null, stopped: false };
+    const live = { events: [], listeners: new Set(), stop: null, stopped: false, seq: 0 };
     liveReplies.set(id, live);
     return live;
 };
@@ -2216,6 +2263,7 @@ const takeTurns = async (chat, body, userId, res) => {
             for (const listener of turn.live.listeners) {
                 if (!listener.writableEnded) listener.end();
             }
+            getNotificationService().sendToUser(String(userId), { type: 'chat:reply', data: { chatId: id, seq: turn.live.seq + 1, event: { type: 'end' } } });
             const content = queuedTurns.get(id)?.shift();
             if (content === undefined) break;
             const live = openLive(id);
@@ -2278,6 +2326,14 @@ export const getActivity = asyncHandler(async (req, res) => {
     });
 });
 
+// What a reply in progress has sent so far, for an app that joins late or missed a piece on the live connection.
+export const liveReply = asyncHandler(async (req, res) => {
+    const chat = await findChat(req, res);
+    if (!chat) return;
+    const live = liveReplies.get(chat.id);
+    res.status(200).json({ success: true, replying: Boolean(live), seq: live?.seq || 0, events: live?.events || [] });
+});
+
 export const rejoinReply = asyncHandler(async (req, res) => {
     const chat = await findChat(req, res);
     if (!chat) return;
@@ -2312,7 +2368,7 @@ export const loadModel = asyncHandler(async (req, res) => {
     try {
         const settings = await applyQueueSettings();
         const ollama = await getOllama();
-        if (!(await ollama.status()).available) throw new OllamaError('OLLAMA_DOWN');
+        if (!(await ollama.status()).available) throw new OllamaError(targetPaused() ? 'DEVICE_PAUSED' : 'OLLAMA_DOWN');
         const model = req.body?.name || await chooseModel(ollama, req.user.id);
         const loaded = (await ollama.running()).models.some((entry) => entry.name === model);
         const busy = queue.busyIn(currentLane());

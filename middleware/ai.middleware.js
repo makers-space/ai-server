@@ -159,6 +159,11 @@ const ERROR_TABLE = {
         message: 'None of your computers can run models right now.',
         action: 'Open the Mollama desktop app on one of them and make sure Ollama is running.'
     },
+    DEVICE_PAUSED: {
+        status: 503,
+        message: 'This computer is paused.',
+        action: 'Resume it on the Devices page, or pick another computer.'
+    },
     DEVICE_OFFLINE: {
         status: 503,
         message: 'This device is not connected right now.',
