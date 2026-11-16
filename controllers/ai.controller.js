@@ -1678,9 +1678,10 @@ const MIN_NEW_WORDS = 2;
 const MAX_SHARED_WORDS = 0.6;
 const SMALL_WORDS = new Set(['a', 'an', 'the', 'of', 'in', 'on', 'for', 'to', 'and', 'or', 'with', 'from', 'by', 'at', 'as', 'is', 's']);
 const queryWords = (query) => [...new Set((String(query).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((word) => !SMALL_WORDS.has(word)))];
-const MAX_RESULTS_CHARS = 24000;
+const MAX_RESULTS_CHARS = 28000;
 const PAGES_PER_SEARCH = 3;
-const PAGES_TO_READ = 2;
+const PAGES_TO_READ = 3;
+const PAGES_LISTED = 5;
 const FILES_PER_SEARCH = 6;
 const CHECKS_PER_SEARCH = 14;
 
@@ -1853,9 +1854,9 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
         }
         if (search.types.length === 0 && !lines.some((line) => line.startsWith('Text of '))) lines.push('The pages below are the result of this search. Their text was not loaded, so give the pages themselves to the user as links. Do not say that nothing was found, and do not write their content from memory.');
         if (search.types.length === 0) {
-            pagesSeen.slice(0, 2).filter((page) => !sources.some((known) => known.url === page.url)).forEach((page) => sources.push({ title: page.title, url: page.url }));
+            pagesSeen.slice(0, PAGES_TO_READ).filter((page) => !sources.some((known) => known.url === page.url)).forEach((page) => sources.push({ title: page.title, url: page.url }));
         }
-        lines.push('Pages (web pages, never for src; give as links, [title](address)):', ...pagesSeen.slice(0, 3).map((result) => `- ${clip(result.title, 100)} | ${result.url} | ${clip(result.content, 160).replace(/\s+/g, ' ')}`));
+        lines.push('Pages (web pages, never for src; give as links, [title](address)):', ...pagesSeen.slice(0, PAGES_LISTED).map((result) => `- ${clip(result.title, 100)} | ${result.url} | ${clip(result.content, 160).replace(/\s+/g, ' ')}`));
         sections.push(lines.join('\n'));
     };
     const runPage = async (target) => {
@@ -2149,7 +2150,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         if (gone) reply.stopped = true;
         // The pages a web answer rests on are always given to the user: when the model left them out, they are added.
         if (found?.sources?.length > 0 && reply.content && !gone && !found.sources.some((page) => reply.content.includes(page.url))) {
-            const listed = found.sources.slice(0, 3).map((page) => `- [${clip(page.title, 100).replace(/[\[\]]/g, '') || hostName(page.url)}](${page.url})`);
+            const listed = found.sources.slice(0, PAGES_LISTED).map((page) => `- [${clip(page.title, 100).replace(/[\[\]]/g, '') || hostName(page.url)}](${page.url})`);
             const added = `\n\nSources:\n${listed.join('\n')}`;
             reply.content += added;
             write({ type: 'token', text: added });
