@@ -52,6 +52,7 @@ router.validRoutes = [
     '/api/v1/files/text',
     '/api/v1/files/save',
     '/api/v1/files/remote',
+    '/api/v1/tools/catalogue',
     '/api/v1/tools/servers',
     '/api/v1/tools/servers/:id',
     '/api/v1/tools/servers/:id/check',
@@ -136,6 +137,7 @@ router.post('/files/save', ...signedIn, validateRequest(chatSchemas.fileSave), a
 
 const withToolServerId = validateRequest(toolSchemas.serverId, 'params');
 router.get('/tools/callback', aiController.requireDatabase, validateRequest(toolSchemas.callback, 'query'), aiController.finishToolServerSignIn);
+router.get('/tools/catalogue', ...signedIn, aiController.listToolCatalogue);
 router.get('/tools/servers', ...signedIn, aiController.listToolServers);
 router.post('/tools/servers', ...signedIn, validateRequest(toolSchemas.add), aiController.addToolServer);
 router.patch('/tools/servers/:id', ...signedIn, withToolServerId, validateRequest(toolSchemas.update), aiController.updateToolServer);

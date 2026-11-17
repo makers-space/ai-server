@@ -14,7 +14,7 @@ import {
     OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
-    TOOL_HEALTH, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
+    TOOL_HEALTH, TOOL_CATALOGUE, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
 } from '../middleware/ai.middleware.js';
 
 const MB = 1024 * 1024;
@@ -2817,6 +2817,10 @@ const findToolServer = async (req, res) => {
     if (!server) res.status(404).json({ success: false, message: 'Tool server not found' });
     return server;
 };
+
+export const listToolCatalogue = asyncHandler(async (req, res) => {
+    res.status(200).json({ success: true, apps: TOOL_CATALOGUE });
+});
 
 export const listToolServers = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ kind: -1, name: 1 });

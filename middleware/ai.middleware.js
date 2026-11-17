@@ -1389,3 +1389,42 @@ export const toolFault = (error, withKey = false) => {
     if (error instanceof OllamaError && error.code === 'REMOTE_BLOCKED') return 'blocked';
     return 'unreachable';
 };
+
+// Online apps whose makers run a tool server of their own that any app may connect to. Each address was read from
+// the maker's documentation and answered when tried on 2026-11-17. "signIn" is what the app asks for: an account
+// (its own sign-in page), a key the person pastes, or nothing.
+const app = (name, group, address, does, signIn = 'account') => ({ name, group, address, does, signIn });
+export const TOOL_CATALOGUE = [
+    app('Notion', 'Notes and docs', 'https://mcp.notion.com/mcp', 'Search, read, create and edit pages and databases'),
+    app('Atlassian', 'Notes and docs', 'https://mcp.atlassian.com/v2/mcp', 'Search and edit Jira issues and Confluence pages'),
+    app('Airtable', 'Notes and docs', 'https://mcp.airtable.com/mcp', 'Read and write bases and records'),
+    app('Coda', 'Notes and docs', 'https://coda.io/apis/mcp', 'Read and edit docs and tables'),
+    app('Linear', 'Projects', 'https://mcp.linear.app/mcp', 'Find, create and update issues and projects'),
+    app('ClickUp', 'Projects', 'https://mcp.clickup.com/mcp', 'Manage tasks, docs and time'),
+    app('Trello', 'Projects', 'https://mcp.trello.com/v1', 'Read and update boards, lists and cards'),
+    app('Todoist', 'Projects', 'https://ai.todoist.net/mcp', 'Add, find and complete tasks'),
+    app('monday.com', 'Projects', 'https://mcp.monday.com/mcp', 'Read and update boards and items'),
+    app('GitHub', 'Code', 'https://api.githubcopilot.com/mcp/', 'Work with repositories, issues and pull requests', 'key'),
+    app('GitLab', 'Code', 'https://gitlab.com/api/v4/mcp', 'Work with issues, merge requests and pipelines'),
+    app('Sentry', 'Code', 'https://mcp.sentry.dev/mcp', 'Look into errors, issues and traces'),
+    app('Netlify', 'Code', 'https://mcp.netlify.com/mcp', 'Create, deploy and manage sites'),
+    app('Cloudflare', 'Code', 'https://mcp.cloudflare.com/mcp', 'Manage what runs on your Cloudflare account'),
+    app('Cloudflare Docs', 'Code', 'https://docs.mcp.cloudflare.com/mcp', 'Search the Cloudflare documentation', 'none'),
+    app('Supabase', 'Code', 'https://mcp.supabase.com/mcp', 'Manage projects, run queries and read logs'),
+    app('Neon', 'Code', 'https://mcp.neon.tech/mcp', 'Manage Postgres projects and run queries'),
+    app('PostHog', 'Code', 'https://mcp.posthog.com/mcp', 'Ask about product analytics, flags and errors'),
+    app('Context7', 'Code', 'https://mcp.context7.com/mcp', 'Fetch current documentation for code libraries', 'none'),
+    app('DeepWiki', 'Code', 'https://mcp.deepwiki.com/mcp', 'Ask questions about public GitHub repositories', 'none'),
+    app('Miro', 'Design', 'https://mcp.miro.com/', 'Read and create board content and diagrams'),
+    app('Webflow', 'Design', 'https://mcp.webflow.com/mcp', 'Edit sites, pages and collection items'),
+    app('Wix', 'Design', 'https://mcp.wix.com/mcp', 'Manage Wix sites'),
+    app('WordPress.com', 'Design', 'https://public-api.wordpress.com/wpcom/v2/mcp/v1', 'Manage posts, pages and site settings'),
+    app('Calendly', 'Messages and customers', 'https://mcp.calendly.com', 'Read availability and scheduled events'),
+    app('Stripe', 'Payments and shops', 'https://mcp.stripe.com', 'Manage customers, invoices and subscriptions'),
+    app('Hugging Face', 'Search and data', 'https://huggingface.co/mcp', 'Search models, datasets, Spaces and papers', 'none'),
+    app('Exa', 'Search and data', 'https://mcp.exa.ai/mcp', 'Search the web and read pages', 'none'),
+    app('Firecrawl', 'Search and data', 'https://mcp.firecrawl.dev/v2/mcp', 'Search, scrape and read web pages', 'none'),
+    app('Tavily', 'Search and data', 'https://mcp.tavily.com/mcp/', 'Search the web and pull out page content'),
+    app('Zapier', 'Automation', 'https://mcp.zapier.com/api/v1/connect', 'Run actions across thousands of connected apps'),
+    app('Make', 'Automation', 'https://mcp.make.com/v2', 'Run and manage automation scenarios')
+];
