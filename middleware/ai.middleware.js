@@ -1393,7 +1393,8 @@ export const toolFault = (error, withKey = false) => {
 // Online apps whose makers run a tool server of their own that any app may connect to. Each address was read from
 // the maker's documentation and answered when tried on 2026-11-17. "signIn" is what the app asks for: an account
 // (its own sign-in page), a key the person pastes, or nothing.
-const app = (name, group, address, does, signIn = 'account') => ({ name, group, address, does, signIn });
+// An app that needs a key also says where the key is made and how, in the order a person does it.
+const app = (name, group, address, does, signIn = 'account', key = null) => ({ name, group, address, does, signIn, key });
 export const TOOL_CATALOGUE = [
     app('Notion', 'Notes and docs', 'https://mcp.notion.com/mcp', 'Search, read, create and edit pages and databases'),
     app('Atlassian', 'Notes and docs', 'https://mcp.atlassian.com/v2/mcp', 'Search and edit Jira issues and Confluence pages'),
@@ -1404,7 +1405,17 @@ export const TOOL_CATALOGUE = [
     app('Trello', 'Projects', 'https://mcp.trello.com/v1', 'Read and update boards, lists and cards'),
     app('Todoist', 'Projects', 'https://ai.todoist.net/mcp', 'Add, find and complete tasks'),
     app('monday.com', 'Projects', 'https://mcp.monday.com/mcp', 'Read and update boards and items'),
-    app('GitHub', 'Code', 'https://api.githubcopilot.com/mcp/', 'Work with repositories, issues and pull requests', 'key'),
+    app('GitHub', 'Code', 'https://api.githubcopilot.com/mcp/', 'Work with repositories, issues and pull requests', 'key', {
+        page: 'https://github.com/settings/personal-access-tokens/new',
+        cost: 'Free with any GitHub account.',
+        steps: [
+            'Open the key page while signed in to GitHub. GitHub calls the key a fine-grained personal access token.',
+            'Give it a name such as Mollama, and pick when it should expire.',
+            'Under Repository access, choose the repositories Mollama may work with.',
+            'Under Permissions, allow what you want models to do: Contents, Issues and Pull requests cover most uses. Choose Read-only to let them look without changing anything.',
+            'Choose Generate token, copy it, and paste it into the Key box here. GitHub shows it only once.'
+        ]
+    }),
     app('GitLab', 'Code', 'https://gitlab.com/api/v4/mcp', 'Work with issues, merge requests and pipelines'),
     app('Sentry', 'Code', 'https://mcp.sentry.dev/mcp', 'Look into errors, issues and traces'),
     app('Netlify', 'Code', 'https://mcp.netlify.com/mcp', 'Create, deploy and manage sites'),
