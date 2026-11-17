@@ -266,8 +266,9 @@ class DownloadManager extends EventEmitter {
         return docs.map((doc) => this.present(doc));
     }
 
+    // A progress save is not waited for, so it can arrive after the save that ends the download. It must not undo that one.
     save(doc, fields, { final = false, attempt = 0 } = {}) {
-        return within(Download.updateOne({ _id: doc._id }, fields), this.saveWaitMs)
+        return within(Download.updateOne(final ? { _id: doc._id } : { _id: doc._id, status: { $nin: FINAL_STATES } }, fields), this.saveWaitMs)
             .then(() => {
                 if (final) this.live.delete(doc.id);
             })
