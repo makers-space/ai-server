@@ -281,6 +281,52 @@ chatSchema.index({ service: 1, owner: 1, updatedAt: -1 });
 
 export const Chat = mongoose.models.Chat || mongoose.model('Chat', chatSchema);
 
+export const TOOL_HEALTH_STATES = ['unchecked', 'healthy', 'signin', 'refused', 'unreachable', 'blocked', 'empty', 'offline', 'outdated', 'stopped', 'missing'];
+
+const toolSchema = new mongoose.Schema({
+    name: { type: String, required: true },
+    title: { type: String, default: null },
+    description: { type: String, default: '' },
+    readOnly: { type: Boolean, default: false },
+    input: { type: mongoose.Schema.Types.Mixed, default: null }
+}, { _id: false });
+
+// A tool server a person has added. Remote ones are reached from this server by their address; local ones run on
+// a linked computer and are reached through the desktop app there, which is the only place their start command is kept.
+const toolServerSchema = new mongoose.Schema({
+    service: { type: String, default: SERVICE, immutable: true, index: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    name: { type: String, required: true, trim: true, maxlength: 60 },
+    kind: { type: String, enum: ['remote', 'local'], required: true },
+    address: { type: String, default: null },
+    device: { type: mongoose.Schema.Types.ObjectId, ref: 'Device', default: null },
+    localId: { type: String, default: null },
+    signIn: { type: String, enum: ['none', 'key', 'account'], default: 'none' },
+    sealed: { type: String, default: null, select: false },
+    signInState: { type: String, default: null, select: false, index: true },
+    tools: { type: [toolSchema], default: [] },
+    health: { type: String, enum: TOOL_HEALTH_STATES, default: 'unchecked' },
+    healthDetail: { type: String, default: null },
+    checkedAt: { type: Date, default: null }
+}, { timestamps: true });
+
+export const ToolServer = mongoose.models.ToolServer || mongoose.model('ToolServer', toolServerSchema);
+
+const toolServerName = Joi.string().trim().min(1).max(60);
+export const toolSchemas = {
+    serverId: Joi.object({ id: Joi.objectId().required() }),
+    add: Joi.object({
+        kind: Joi.string().valid('remote', 'local').required(),
+        name: toolServerName.required(),
+        address: Joi.when('kind', { is: 'remote', then: Joi.string().trim().uri({ scheme: ['https'] }).max(500).required(), otherwise: Joi.forbidden() }),
+        key: Joi.when('kind', { is: 'remote', then: Joi.string().trim().max(4000).allow('', null), otherwise: Joi.forbidden() }),
+        device: Joi.when('kind', { is: 'local', then: Joi.objectId().required(), otherwise: Joi.forbidden() }),
+        localId: Joi.when('kind', { is: 'local', then: Joi.string().pattern(/^[a-z0-9-]{8,40}$/).required(), otherwise: Joi.forbidden() })
+    }),
+    update: Joi.object({ name: toolServerName, key: Joi.string().trim().max(4000).allow('', null) }).min(1),
+    callback: Joi.object({ state: Joi.string().max(200), code: Joi.string().max(4000), iss: Joi.string().max(1000) }).unknown(true)
+};
+
 const generationOptions = Joi.object({
     temperature: Joi.number().min(0).max(2),
     num_ctx: Joi.number().integer().min(512).max(262144),

@@ -4,7 +4,7 @@ import * as authMiddleware from '../middleware/auth.middleware.js';
 import { RIGHTS } from '../config/rights.js';
 import { noCacheResponse } from '../middleware/cache.middleware.js';
 import { validateRequest } from '../middleware/validation.middleware.js';
-import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas } from '../models/ai.model.js';
+import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas, toolSchemas } from '../models/ai.model.js';
 
 const router = Router();
 
@@ -51,7 +51,12 @@ router.validRoutes = [
     '/api/v1/files/browse',
     '/api/v1/files/text',
     '/api/v1/files/save',
-    '/api/v1/files/remote'
+    '/api/v1/files/remote',
+    '/api/v1/tools/servers',
+    '/api/v1/tools/servers/:id',
+    '/api/v1/tools/servers/:id/check',
+    '/api/v1/tools/servers/:id/sign-in',
+    '/api/v1/tools/callback'
 ];
 
 const signedIn = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.USE_MODELS), noCacheResponse(), aiController.useDevice];
@@ -128,5 +133,14 @@ router.get('/files/browse', ...signedIn, validateRequest(chatSchemas.browse, 'qu
 router.get('/files/text', ...signedIn, validateRequest(chatSchemas.fileText, 'query'), aiController.readFileText);
 router.get('/files/remote', ...signedIn, validateRequest(chatSchemas.remote, 'query'), aiController.loadRemote);
 router.post('/files/save', ...signedIn, validateRequest(chatSchemas.fileSave), aiController.saveFile);
+
+const withToolServerId = validateRequest(toolSchemas.serverId, 'params');
+router.get('/tools/callback', aiController.requireDatabase, validateRequest(toolSchemas.callback, 'query'), aiController.finishToolServerSignIn);
+router.get('/tools/servers', ...signedIn, aiController.listToolServers);
+router.post('/tools/servers', ...signedIn, validateRequest(toolSchemas.add), aiController.addToolServer);
+router.patch('/tools/servers/:id', ...signedIn, withToolServerId, validateRequest(toolSchemas.update), aiController.updateToolServer);
+router.delete('/tools/servers/:id', ...signedIn, withToolServerId, aiController.removeToolServer);
+router.post('/tools/servers/:id/check', ...signedIn, withToolServerId, aiController.checkToolServerNow);
+router.post('/tools/servers/:id/sign-in', ...signedIn, withToolServerId, aiController.startToolSignIn);
 
 export default router;

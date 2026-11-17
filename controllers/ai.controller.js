@@ -9,11 +9,12 @@ import mongoose from 'mongoose';
 import logger from '../utils/app.logger.js';
 import { asyncHandler, getNotificationService } from '../middleware/app.middleware.js';
 import { hasRight, RIGHTS } from '../config/rights.js';
-import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas } from '../models/ai.model.js';
+import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
-    searchReady, searchWeb, readPage, deviceGateway
+    searchReady, searchWeb, readPage, deviceGateway,
+    TOOL_HEALTH, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
 } from '../middleware/ai.middleware.js';
 
 const MB = 1024 * 1024;
@@ -2749,4 +2750,164 @@ export const saveFile = asyncHandler(async (req, res) => {
     } catch (error) {
         sendOllamaError(res, error);
     }
+});
+
+const MAX_TOOL_SERVERS = 20;
+
+const presentToolServer = (server) => ({
+    id: server.id,
+    name: server.name,
+    kind: server.kind,
+    address: server.address,
+    device: server.device ? String(server.device) : null,
+    signIn: server.signIn,
+    tools: server.tools.map(({ name, title, description, readOnly }) => ({ name, title, description, readOnly })),
+    health: {
+        state: server.health,
+        label: TOOL_HEALTH[server.health].label,
+        needs: TOOL_HEALTH[server.health].needs,
+        detail: server.healthDetail,
+        checkedAt: server.checkedAt
+    }
+});
+
+const toolCallbackUrl = (req) => `${process.env.NODE_ENV === 'production' ? 'https' : req.protocol}://${req.get('host')}/api/v1/tools/callback`;
+
+// Finds out whether a tool server can be used right now, and records what it offers. The server comes with its sealed part.
+const checkToolServer = async (server) => {
+    const before = server.health;
+    let state;
+    let detail = null;
+    let tools = null;
+    if (server.kind === 'local') {
+        if (!deviceGateway.isOnline(server.device)) state = 'offline';
+        else {
+            try {
+                const answer = await deviceGateway.tools(server.device, { action: 'check', localId: server.localId });
+                state = ['healthy', 'stopped', 'missing', 'empty'].includes(answer?.state) ? answer.state : 'stopped';
+                detail = answer?.detail ? String(answer.detail).slice(0, 300) : null;
+                if (state === 'healthy') tools = (Array.isArray(answer.tools) ? answer.tools : []).slice(0, 200);
+            } catch (error) {
+                state = error instanceof OllamaError ? 'offline' : 'outdated';
+            }
+        }
+    } else {
+        const kept = unseal(server.sealed) || {};
+        const keeper = kept.key ? null : accountKeeper(kept, kept.redirect);
+        try {
+            tools = await withToolServer({ address: server.address, key: kept.key, keeper }, readTools);
+            state = tools.length > 0 ? 'healthy' : 'empty';
+        } catch (error) {
+            state = toolFault(error, Boolean(kept.key));
+        }
+        if (keeper) server.sealed = seal(kept);
+        if (keeper && (kept.tokens || state === 'signin')) server.signIn = 'account';
+    }
+    server.health = state;
+    server.healthDetail = detail;
+    server.checkedAt = new Date();
+    if (tools) server.tools = tools;
+    await server.save();
+    if (before !== state) getNotificationService().sendToUser(String(server.owner), { type: 'tools:changed', data: { id: server.id, health: state } });
+    return server;
+};
+
+const findToolServer = async (req, res) => {
+    const server = await ToolServer.findOne({ _id: req.params.id, service: SERVICE, owner: req.user.id }).select('+sealed');
+    if (!server) res.status(404).json({ success: false, message: 'Tool server not found' });
+    return server;
+};
+
+export const listToolServers = asyncHandler(async (req, res) => {
+    const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ kind: -1, name: 1 });
+    res.status(200).json({ success: true, servers: servers.map(presentToolServer) });
+});
+
+export const addToolServer = asyncHandler(async (req, res) => {
+    if (await ToolServer.countDocuments({ service: SERVICE, owner: req.user.id }) >= MAX_TOOL_SERVERS) {
+        return res.status(422).json({ success: false, message: 'You have 20 tool servers, which is the limit.', action: 'Remove one you no longer use.' });
+    }
+    const { kind, name, address, key, device, localId } = req.body;
+    const fields = { owner: req.user.id, name, kind };
+    if (kind === 'local') {
+        const computer = await Device.findOne({ _id: device, service: SERVICE, kind: 'companion', registeredBy: req.user.id });
+        if (!computer) return res.status(404).json({ success: false, message: 'That computer is not one of yours.', action: 'Add it from the Mollama desktop app on that computer.' });
+        if (await ToolServer.exists({ service: SERVICE, owner: req.user.id, device, localId })) return res.status(409).json({ success: false, message: 'That tool server is already added.' });
+        Object.assign(fields, { device, localId });
+    } else {
+        Object.assign(fields, { address, signIn: key ? 'key' : 'none', sealed: seal(key ? { key } : { redirect: toolCallbackUrl(req) }) });
+    }
+    const server = await checkToolServer(await ToolServer.create(fields));
+    res.status(201).json({ success: true, server: presentToolServer(server) });
+});
+
+export const checkToolServerNow = asyncHandler(async (req, res) => {
+    const server = await findToolServer(req, res);
+    if (!server) return;
+    res.status(200).json({ success: true, server: presentToolServer(await checkToolServer(server)) });
+});
+
+export const updateToolServer = asyncHandler(async (req, res) => {
+    const server = await findToolServer(req, res);
+    if (!server) return;
+    if ('name' in req.body) server.name = req.body.name;
+    if ('key' in req.body && server.kind === 'remote') {
+        server.sealed = seal(req.body.key ? { key: req.body.key } : { redirect: toolCallbackUrl(req) });
+        server.signIn = req.body.key ? 'key' : 'none';
+        await checkToolServer(server);
+    } else {
+        await server.save();
+    }
+    res.status(200).json({ success: true, server: presentToolServer(server) });
+});
+
+export const removeToolServer = asyncHandler(async (req, res) => {
+    const server = await findToolServer(req, res);
+    if (!server) return;
+    await server.deleteOne();
+    res.status(200).json({ success: true, message: 'Tool server removed.' });
+});
+
+// Starts a sign-in to the app behind a remote tool server and answers with the app's own sign-in address.
+export const startToolSignIn = asyncHandler(async (req, res) => {
+    const server = await findToolServer(req, res);
+    if (!server) return;
+    if (server.kind !== 'remote') return res.status(422).json({ success: false, message: 'Only remote tool servers are signed in to.' });
+    const kept = { redirect: toolCallbackUrl(req), state: crypto.randomBytes(24).toString('base64url') };
+    const keeper = accountKeeper(kept, kept.redirect);
+    try {
+        await withToolServer({ address: server.address, keeper }, async () => null);
+    } catch (error) {
+        if (!(error instanceof ToolSignInError) || !/^https:\/\//.test(keeper.asked || '')) {
+            return res.status(422).json({ success: false, message: 'This app did not offer a way to sign in.', action: 'If it gave you a key, add the key instead.' });
+        }
+        server.sealed = seal(kept);
+        server.signInState = hashKey(kept.state);
+        server.signIn = 'account';
+        await server.save();
+        return res.status(200).json({ success: true, url: keeper.asked });
+    }
+    res.status(200).json({ success: true, url: null, server: presentToolServer(await checkToolServer(server)) });
+});
+
+// Where the app sends the person back after signing in. There is no session here, so the state value finds the server.
+export const finishToolServerSignIn = asyncHandler(async (req, res) => {
+    const back = (result) => res.redirect(`${process.env.APP_URL}/tools?signin=${result}`);
+    const state = String(req.query.state || '');
+    const server = state ? await ToolServer.findOne({ service: SERVICE, signInState: hashKey(state) }).select('+sealed +signInState') : null;
+    if (!server) return back('failed');
+    const kept = unseal(server.sealed) || {};
+    server.signInState = null;
+    try {
+        if (!req.query.code || kept.state !== state) throw new Error('refused');
+        await finishToolSignIn(server.address, accountKeeper(kept, kept.redirect), new URLSearchParams({ code: String(req.query.code), state, ...(req.query.iss ? { iss: String(req.query.iss) } : {}) }));
+    } catch {
+        await server.save();
+        return back('failed');
+    }
+    delete kept.state;
+    delete kept.verifier;
+    server.sealed = seal(kept);
+    await checkToolServer(server);
+    back(server.health === 'healthy' ? 'done' : 'failed');
 });

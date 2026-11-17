@@ -6,7 +6,10 @@ import { EventEmitter } from 'node:events';
 import dns from 'node:dns/promises';
 import https from 'node:https';
 import net from 'node:net';
+import crypto from 'node:crypto';
+import { Readable } from 'node:stream';
 import { Ollama } from 'ollama';
+import { Client, StreamableHTTPClientTransport, SSEClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 
 const ERROR_TABLE = {
     OLLAMA_DOWN: {
@@ -353,6 +356,24 @@ export class DeviceGateway extends EventEmitter {
 
     disconnect(deviceId) {
         this.devices.get(String(deviceId))?.ws.close(1000, 'Removed');
+    }
+
+    // Asks the desktop app about the tool servers on its computer. An app too old to know the question stays silent.
+    tools(deviceId, request, ms = this.askMs) {
+        return new Promise((resolve, reject) => {
+            const entry = this.devices.get(String(deviceId));
+            if (!entry) return reject(new OllamaError('DEVICE_OFFLINE'));
+            const id = String(++this.counter);
+            const timer = setTimeout(() => finish(() => reject(new Error('silent'))), ms);
+            timer.unref?.();
+            const finish = (settle) => { clearTimeout(timer); entry.pending.delete(id); settle(); };
+            entry.pending.set(id, {
+                answer: (message) => finish(() => resolve(message.data)),
+                error: () => finish(() => reject(new Error('silent'))),
+                fail: () => finish(() => reject(new OllamaError('DEVICE_OFFLINE')))
+            });
+            if (!this.send(entry, { id, type: 'tools', ...request })) entry.pending.get(id)?.fail();
+        });
     }
 
     ask(deviceId, what) {
@@ -1218,4 +1239,153 @@ export const readPage = async (address) => {
         .trim();
     const embedded = [...new Set(raw.replace(/\\\//g, '/').match(/https:\/\/[^\s"'<>\\)]+/g) || [])].slice(0, 2000);
     return { title, content, links, media, embedded, file: null };
+};
+
+// Tool servers. Each state says what is true now; "needs" says what has to be true for the server to be usable.
+export const TOOL_HEALTH = {
+    healthy: { label: 'Ready', needs: [] },
+    unchecked: { label: 'Not checked yet', needs: ['Mollama has not checked this one yet. Choose Check now.'] },
+    signin: { label: 'Sign-in needed', needs: ['Sign in to this app, so Mollama can use it on your behalf.'] },
+    refused: { label: 'Access refused', needs: ['The key or sign-in was not accepted. Sign in again, or replace the key.'] },
+    unreachable: { label: 'Cannot be reached', needs: ['The address has to be the tool server address exactly as the app gives it.', 'The tool server has to be up. If it was working before, try again in a few minutes.'] },
+    blocked: { label: 'Address not allowed', needs: ['Remote tools need a public address that starts with https.', 'For an app on your own computer, add it under Local tools instead.'] },
+    empty: { label: 'No tools offered', needs: ['The server answered but offered no tools. Your account there may need a plan or permission that includes them.'] },
+    offline: { label: 'Computer offline', needs: ['That computer has to be on, with the Mollama desktop app open and signed in.'] },
+    outdated: { label: 'Desktop app too old', needs: ['Update the Mollama desktop app on that computer, then open it again.'] },
+    stopped: { label: 'Not running', needs: ['The tool server could not be started on that computer. The program it runs with has to be installed there.', 'If it controls an app, that app has to be open.'] },
+    missing: { label: 'Not on that computer', needs: ['This tool server is no longer set up on that computer. Remove it here and add it again from the desktop app.'] }
+};
+
+const sealKey = () => Buffer.from(crypto.hkdfSync('sha256', String(process.env.ACCESS_TOKEN_SECRET), '', 'mollama-tool-servers', 32));
+export const seal = (value) => {
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', sealKey(), iv);
+    const body = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
+    return [iv, cipher.getAuthTag(), body].map((part) => part.toString('base64url')).join('.');
+};
+export const unseal = (text) => {
+    try {
+        const [iv, tag, body] = String(text).split('.').map((part) => Buffer.from(part, 'base64url'));
+        const decipher = crypto.createDecipheriv('aes-256-gcm', sealKey(), iv);
+        decipher.setAuthTag(tag);
+        return JSON.parse(Buffer.concat([decipher.update(body), decipher.final()]).toString('utf8'));
+    } catch {
+        return null;
+    }
+};
+
+// Every request to a tool server goes to a public https address, held to the address that was checked.
+const guardedFetch = async (input, init = {}) => {
+    const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
+    if (url.protocol !== 'https:' || url.username || url.password) throw new OllamaError('REMOTE_BLOCKED');
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    let addresses;
+    try {
+        addresses = net.isIP(host) ? [{ address: host, family: net.isIP(host) }] : await dns.lookup(host, { all: true });
+    } catch (error) {
+        throw new OllamaError('REMOTE_FAILED', error.message);
+    }
+    if (addresses.length === 0 || addresses.some((entry) => !isPublicAddress(entry.address))) throw new OllamaError('REMOTE_BLOCKED');
+    const pinned = addresses[0];
+    const method = String(init.method || 'GET').toUpperCase();
+    return new Promise((resolve, reject) => {
+        const request = https.request(url, {
+            method,
+            headers: Object.fromEntries(new Headers(init.headers || {})),
+            timeout: 60000,
+            lookup: (hostname, options, callback) => (options?.all
+                ? callback(null, [{ address: pinned.address, family: pinned.family }])
+                : callback(null, pinned.address, pinned.family))
+        }, (response) => {
+            const headers = new Headers();
+            for (const [name, value] of Object.entries(response.headers)) for (const one of [].concat(value)) headers.append(name, one);
+            const bare = method === 'HEAD' || [204, 205, 304].includes(response.statusCode);
+            if (bare) response.resume();
+            resolve(new Response(bare ? null : Readable.toWeb(response), { status: response.statusCode, statusText: response.statusMessage, headers }));
+        });
+        request.on('timeout', () => request.destroy(new Error('timed out')));
+        request.on('error', reject);
+        init.signal?.addEventListener('abort', () => request.destroy(init.signal.reason || new Error('aborted')), { once: true });
+        request.end(init.body == null ? undefined : typeof init.body === 'string' || init.body instanceof URLSearchParams ? String(init.body) : Buffer.from(init.body));
+    });
+};
+
+const TOOL_CLIENT = { name: 'mollama', version: '1.0.0' };
+const openRemote = async (address, options) => {
+    const url = new URL(address);
+    const first = new Client(TOOL_CLIENT);
+    try {
+        await first.connect(new StreamableHTTPClientTransport(url, options));
+        return first;
+    } catch (error) {
+        if (error instanceof UnauthorizedError || error instanceof OllamaError || [401, 403].includes(error?.status)) throw error;
+        const older = new Client(TOOL_CLIENT);
+        try {
+            await older.connect(new SSEClientTransport(url, options));
+            return older;
+        } catch {
+            throw error;
+        }
+    }
+};
+const finishRemote = (address, keeper, params) => new StreamableHTTPClientTransport(new URL(address), { fetch: guardedFetch, authProvider: keeper }).finishAuth(params);
+
+let toolConnector = openRemote;
+let toolFinisher = finishRemote;
+export const setToolConnector = (connector = null, finisher = null) => {
+    toolConnector = connector || openRemote;
+    toolFinisher = finisher || finishRemote;
+};
+export { UnauthorizedError as ToolSignInError };
+
+// Holds one person's sign-in to one tool server while the library signs in, refreshes or uses it. "kept" is what gets sealed.
+export const accountKeeper = (kept, redirectUrl) => ({
+    asked: null,
+    get redirectUrl() { return redirectUrl; },
+    get clientMetadata() {
+        return { client_name: 'Mollama', redirect_uris: [redirectUrl], grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], token_endpoint_auth_method: 'none', application_type: 'web' };
+    },
+    state: () => kept.state,
+    clientInformation: () => kept.client,
+    saveClientInformation: (client) => { kept.client = client; },
+    tokens: () => kept.tokens,
+    saveTokens: (tokens) => { kept.tokens = tokens; },
+    redirectToAuthorization(url) { this.asked = String(url); },
+    saveCodeVerifier: (verifier) => { kept.verifier = verifier; },
+    codeVerifier: () => kept.verifier,
+    invalidateCredentials: (scope) => {
+        if (scope === 'all' || scope === 'tokens') delete kept.tokens;
+        if (scope === 'all' || scope === 'client') delete kept.client;
+        if (scope === 'all' || scope === 'verifier') delete kept.verifier;
+    }
+});
+
+export const withToolServer = async ({ address, key = null, keeper = null }, work) => {
+    const options = { fetch: guardedFetch, ...(key ? { requestInit: { headers: { Authorization: `Bearer ${key}` } } } : keeper ? { authProvider: keeper } : {}) };
+    const client = await toolConnector(address, options);
+    try {
+        return await work(client);
+    } finally {
+        await client.close().catch(() => {});
+    }
+};
+export const finishToolSignIn = (address, keeper, params) => toolFinisher(address, keeper, params);
+
+export const MAX_SERVER_TOOLS = 200;
+export const readTools = async (client) => {
+    const { tools = [] } = await client.listTools();
+    return tools.slice(0, MAX_SERVER_TOOLS).map((tool) => ({
+        name: String(tool.name).slice(0, 120),
+        title: tool.title || tool.annotations?.title || null,
+        description: String(tool.description || '').slice(0, 600),
+        readOnly: tool.annotations?.readOnlyHint === true,
+        input: tool.inputSchema || null
+    }));
+};
+
+export const toolFault = (error, withKey = false) => {
+    if (error instanceof UnauthorizedError || error?.status === 401) return withKey ? 'refused' : 'signin';
+    if (error?.status === 403) return 'refused';
+    if (error instanceof OllamaError && error.code === 'REMOTE_BLOCKED') return 'blocked';
+    return 'unreachable';
 };
