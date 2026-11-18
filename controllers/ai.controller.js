@@ -1500,9 +1500,10 @@ const capacityFor = (chat, facts) => {
     return chosen > 0 ? Math.min(chosen, facts.contextLength) : Math.min(facts.contextLength, AUTO_CONTEXT_LIMIT);
 };
 
-// What the models are told lives in server/instructions: assistant.md is always sent, search.md is used by web search,
-// each file in skills/ is a skill of Mollama's own, and library/ holds skills taken unchanged from other projects, one
-// folder per project. A chat turns skills on or off. Credits and licences are in THIRD_PARTY.md.
+// What the models are told lives in server/instructions, and all of it is skills a chat turns on or off: skills/ holds
+// the one skill of Mollama's own, which makes its viewers work, and library/ holds skills from other projects, one
+// folder per project. Nothing else is sent: no base instructions, no tool rules, no search rules. Credits and licences
+// are in THIRD_PARTY.md.
 const INSTRUCTIONS = path.join(import.meta.dirname, '..', 'instructions');
 const readGuide = (file) => {
     const text = fs.readFileSync(path.join(INSTRUCTIONS, file), 'utf8').replace(/\r\n/g, '\n');
@@ -1511,8 +1512,6 @@ const readGuide = (file) => {
     const parts = `\n${text.slice(head?.[0].length || 0)}`.split(/\n=== ([A-Z ]+) ===\n/);
     return { facts, body: parts[0].trim(), part: (name) => (parts.includes(name) ? parts[parts.indexOf(name) + 1] : '').trim() };
 };
-const assistantGuide = readGuide('assistant.md');
-const searchGuide = readGuide('search.md');
 const OWN_SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((file) => file.endsWith('.md')).map((file) => {
     const guide = readGuide(path.join('skills', file));
     return {
@@ -1540,6 +1539,7 @@ export const SKILL_SOURCES = {
     medical: { name: 'Medical (Open Medica)', repo: 'Open-Medica/open-medical-skills' },
     dex: { name: 'Chief of staff (Dex)', repo: 'davekilleen/dex' },
     context7: { name: 'Context7', repo: 'upstash/context7' },
+    search: { name: 'Web search (Perplexica, Morphic)', repo: 'ItzCrazyKns/Perplexica, miurla/morphic' },
     last30days: { name: 'Last 30 days', repo: 'mvanhorn/last30days-skill' },
     anatomy: { name: 'Anatomy', repo: 'wheresryan22/anatomy' },
     hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' }
@@ -1600,32 +1600,16 @@ const ownSkillsOf = async (userId) => {
 };
 const skillsFor = (ownerId) => [...SKILLS, ...(ownSkillCache.get(String(ownerId))?.skills || [])];
 const skillsOf = (chat) => skillsFor(chat.owner).filter((skill) => (Array.isArray(chat.skills) ? chat.skills.includes(skill.id) : skill.default));
-const closingOf = (chat) => ['REMEMBER', assistantGuide.part('REMEMBER'), ...skillsOf(chat).map((skill) => skill.remember)].filter(Boolean).join('\n');
-// Extra guidance for one reply goes in before the closing reminder, which stays the last thing the model reads.
-const withGuide = (chat, content, guide) => {
-    const closing = closingOf(chat);
-    return content.endsWith(closing) ? `${content.slice(0, -closing.length)}${guide}\n\n${closing}` : `${content}\n\n${guide}`;
+// A skill may end with a reminder, which is put last so it is the last thing the model reads.
+const closingOf = (chat) => {
+    const reminders = skillsOf(chat).map((skill) => skill.remember).filter(Boolean);
+    return reminders.length > 0 ? ['REMEMBER', ...reminders].join('\n') : '';
 };
 
-export const BASE_GUIDE = assistantGuide.body;
-export const CLOSING_GUIDE = closingOf({});
-export const COMPONENT_GUIDE = `${BASE_GUIDE}\n\n${SKILLS.find((skill) => skill.id === 'components').text}`;
-export const SEARCH_GUIDE = searchGuide.part('WEB SEARCH');
-export const PLAN_GUIDE = searchGuide.part('SEARCH PLAN');
-export const RESULTS_GUIDE = searchGuide.part('WEB RESULTS');
 export const TOUCH_GUIDE = SKILLS.find((skill) => skill.id === 'components').touch;
 const TOUCH_EVERY = 4;
-export const REVIEW_GUIDE = searchGuide.part('SEARCH REVIEW');
 
 const presentSkill = ({ id, name, description, default: on, credit, source, needs, text }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id) });
-// What every chat is sent besides its skills, shown so a person can read exactly what shapes the replies.
-const alwaysSent = () => [
-    { id: 'base-assistant', name: 'Base instructions', description: 'Sent with every chat.', text: BASE_GUIDE },
-    { id: 'base-tools', name: 'Tool rules', description: 'Sent only when a chat has tools on.', text: TOOLS_GUIDE },
-    { id: 'base-search-plan', name: 'Web search: deciding what to search', description: 'Used only when web search is on, to decide whether a message needs a search.', text: PLAN_GUIDE },
-    { id: 'base-search-results', name: 'Web search: using what was found', description: 'Sent only with a message for which pages were found.', text: RESULTS_GUIDE }
-].map((guide) => ({ ...guide, default: false, credit: null, source: 'always', needs: [] }));
-
 export const listSkills = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
     const all = [...SKILLS, ...await ownSkillsOf(req.user.id)];
@@ -1634,7 +1618,6 @@ export const listSkills = asyncHandler(async (req, res) => {
         webSearch: webSearchReady(),
         skills: all.map(presentSkill),
         sources: Object.entries(SKILL_SOURCES).map(([id, source]) => ({ id, name: source.name, repo: source.repo, count: all.filter((skill) => skill.source === id).length })).filter((source) => source.count > 0),
-        always: alwaysSent().map(presentSkill),
         maxSkills: MAX_CHAT_SKILLS,
         maxOwnSkills: MAX_OWN_SKILLS,
         tools: [
@@ -1646,7 +1629,7 @@ export const listSkills = asyncHandler(async (req, res) => {
 
 // The whole text of one skill, for reading before it is turned on.
 export const readSkill = asyncHandler(async (req, res) => {
-    const skill = [...alwaysSent(), ...SKILLS, ...await ownSkillsOf(req.user.id)].find((one) => one.id === req.params.id);
+    const skill = [...SKILLS, ...await ownSkillsOf(req.user.id)].find((one) => one.id === req.params.id);
     if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
     return res.status(200).json({ success: true, skill: { ...presentSkill(skill), text: skill.text } });
 });
@@ -1765,7 +1748,7 @@ const buildMessages = (chat) => {
     const out = [];
     const active = skillsOf(chat);
     const touch = active.some((skill) => skill.id === 'components') && touchAllowed(chat) && TOUCH_GUIDE;
-    const system = [BASE_GUIDE, ...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
+    const system = [...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
@@ -1988,314 +1971,6 @@ const prepareTurn = (chat, body) => {
     return null;
 };
 
-const FILE_TYPES = ['glb', 'gltf', 'obj', 'stl', 'fbx', 'ply', '3mf', 'dae', 'pdf', 'mp4', 'webm', 'mp3', 'wav', 'ogg', 'png', 'jpg', 'gif', 'webp', 'svg', 'csv', 'json', 'md', 'txt'];
-const MEDIA_TYPES = ['png', 'jpg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mp3', 'wav', 'ogg'];
-const CONTENT_TYPES = {
-    'application/pdf': 'pdf', 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg',
-    'video/mp4': 'mp4', 'video/webm': 'webm', 'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav', 'audio/ogg': 'ogg',
-    'model/gltf-binary': 'glb', 'model/gltf+json': 'gltf', 'model/obj': 'obj', 'model/stl': 'stl', 'text/csv': 'csv', 'application/json': 'json', 'text/markdown': 'md'
-};
-const PLAN_FORMAT = {
-    type: 'object',
-    properties: {
-        note: { type: 'string' },
-        searches: {
-            type: 'array',
-            items: {
-                type: 'object',
-                properties: { query: { type: 'string' }, fileTypes: { type: 'array', items: { type: 'string' } } },
-                required: ['query', 'fileTypes']
-            }
-        }
-    },
-    required: ['note', 'searches']
-};
-const REVIEW_FORMAT = {
-    type: 'object',
-    properties: {
-        enough: { type: 'boolean' },
-        searches: PLAN_FORMAT.properties.searches,
-        pages: {
-            type: 'array',
-            items: {
-                type: 'object',
-                properties: { url: { type: 'string' }, fileTypes: { type: 'array', items: { type: 'string' } } },
-                required: ['url', 'fileTypes']
-            }
-        }
-    },
-    required: ['enough', 'searches', 'pages']
-};
-const MAX_SEARCHES = 8;
-const DEEPER_ROUNDS = 12;
-const IDLE_ROUNDS = 2;
-const MAX_DEEPER = 4;
-const MIN_NEW_WORDS = 2;
-const MAX_SHARED_WORDS = 0.6;
-const SMALL_WORDS = new Set(['a', 'an', 'the', 'of', 'in', 'on', 'for', 'to', 'and', 'or', 'with', 'from', 'by', 'at', 'as', 'is', 's']);
-const queryWords = (query) => [...new Set((String(query).toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).filter((word) => !SMALL_WORDS.has(word)))];
-const MAX_RESULTS_CHARS = 28000;
-const PAGES_PER_SEARCH = 3;
-const PAGES_TO_READ = 3;
-const PAGES_LISTED = 5;
-const FILES_PER_SEARCH = 6;
-const CHECKS_PER_SEARCH = 14;
-
-const plainType = (value) => String(value || '').toLowerCase().replace(/^\./, '').replace(/^jpeg$/, 'jpg');
-const typeOfAddress = (address) => {
-    try {
-        return plainType(path.extname(new URL(address).pathname));
-    } catch {
-        return '';
-    }
-};
-const typeOfContent = (contentType) => CONTENT_TYPES[String(contentType || '').toLowerCase().split(';')[0].trim()] || null;
-
-const IMAGE_TYPES = ['png', 'jpg', 'gif', 'webp'];
-const MIN_IMAGE_BYTES = 15000;
-
-const checkFile = async (address, wanted) => {
-    try {
-        const loaded = await fetchRemote(address);
-        loaded.stream.destroy?.();
-        const said = String(loaded.contentType || '').toLowerCase();
-        if (said.includes('html')) return null;
-        const type = typeOfContent(said) || typeOfAddress(address);
-        if (!wanted.includes(type)) return null;
-        if (IMAGE_TYPES.includes(type) && loaded.size && loaded.size < MIN_IMAGE_BYTES) return null;
-        return { url: address, type };
-    } catch {
-        return null;
-    }
-};
-
-const rawAddress = (address) => {
-    const match = String(address).match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
-    return match ? `https://raw.githubusercontent.com/${match[1]}/${match[2]}/${match[3]}` : address;
-};
-
-// The app runs the web search itself: the model only writes the queries, in a fixed JSON shape.
-export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write, steps, stopped, prefix = null, track = null, tools = [] }) => {
-    const known = new Set();
-    const usable = new Set();
-    for (const message of chat.messages) {
-        if (message.role !== 'user') continue;
-        (String(message.content).match(/https?:\/\/[^\s"'<>)\]]+/g) || []).forEach((address) => {
-            known.add(address);
-            usable.add(address);
-        });
-    }
-    const pageReads = new Map();
-    const openPage = (address) => {
-        if (!pageReads.has(address)) pageReads.set(address, readPage(address));
-        return pageReads.get(address);
-    };
-    const fileChecks = new Map();
-    const checkOnce = (address, wanted) => {
-        const key = `${wanted.join(',')} ${address}`;
-        if (!fileChecks.has(key)) fileChecks.set(key, checkFile(address, wanted));
-        return fileChecks.get(key);
-    };
-    const keep = (file) => {
-        known.add(file.url);
-        usable.add(file.url);
-    };
-    const lastUser = [...chat.messages].reverse().find((message) => message.role === 'user');
-    const question = clip(lastUser?.content, 4000);
-    const ask = async (format, guide, content) => {
-        const request = {
-            model: chat.model,
-            stream: true,
-            format,
-            messages: prefix ? [...prefix, { role: 'user', content: `${guide}\n\n${content}` }] : [{ role: 'system', content: guide }, { role: 'user', content }],
-            options: { temperature: 0, num_ctx: numCtx },
-            keep_alive: keepAlive
-        };
-        if (facts.capabilities.includes('thinking')) request.think = false;
-        try {
-            if (stopped()) return {};
-            const stream = await ollama.chat(request);
-            if (track) track(stream);
-            let text = '';
-            for await (const part of stream) text += part.message?.content || '';
-            return JSON.parse(text || '{}') || {};
-        } catch (error) {
-            logger.warn('[Chat] Search plan could not be read', { message: String(error?.message || '').slice(0, 200) });
-            return {};
-        }
-    };
-    const cleanTypes = (list) => [...new Set((Array.isArray(list) ? list : []).map(plainType).filter((type) => FILE_TYPES.includes(type)))];
-    const cleanSearches = (list) => (Array.isArray(list) ? list : [])
-        .map((search) => ({ query: String(search?.query ?? '').trim().slice(0, 200), types: cleanTypes(search?.fileTypes) }))
-        .filter((search) => search.query);
-    // The planner is told the date and which tools the assistant holds, so it leaves to them what they answer exactly.
-    const has = tools.length > 0 ? `\n\nTOOLS THE ASSISTANT HAS\n${tools.map((tool) => `- ${tool.label}: ${tool.description}`).join('\n')}` : '';
-    const plan = await ask(PLAN_FORMAT, PLAN_GUIDE, `TODAY\n${todayLine()}${has}\n\nTHE USER'S MESSAGE\n${question}`);
-    const searches = cleanSearches(plan.searches).slice(0, MAX_SEARCHES);
-    const planNote = String(plan.note ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
-    if (planNote) write({ type: 'note', text: planNote });
-    const openedPages = new Set();
-
-    const sections = [];
-    const sources = [];
-    const note = (tool, input) => {
-        const step = { tool, input, failed: null };
-        steps.push(step);
-        write({ type: 'tool', tool, input });
-        return step;
-    };
-    let limited = false;
-    const runSearch = async (search) => {
-        if (stopped() || limited) return;
-        const lines = [`SEARCH: ${search.query}`];
-        const pagesSeen = [];
-        const files = [];
-        const look = async (query) => {
-            const step = note('web_search', query);
-            let results;
-            try {
-                results = (await searchWeb(query)).filter((result) => /^https:\/\//i.test(result.url));
-            } catch (error) {
-                step.failed = error?.code === 'SEARCH_REFUSED' ? 'refused' : error?.code === 'SEARCH_LIMITED' ? 'limited' : 'unreachable';
-                if (step.failed === 'limited') limited = true;
-                write({ type: 'toolFailed', failed: step.failed });
-                return false;
-            }
-            results.forEach((result) => known.add(result.url));
-            pagesSeen.push(...results.filter((result) => !pagesSeen.some((seen) => seen.url === result.url)));
-
-            const opened = results.slice(0, search.types.length > 0 ? PAGES_PER_SEARCH : PAGES_TO_READ);
-            opened.forEach((result) => {
-                if (!openedPages.has(result.url)) note('web_fetch', result.url);
-                openedPages.add(result.url);
-            });
-            const pages = await Promise.allSettled(opened.map((result) => openPage(result.url)));
-            const candidates = results.map((result) => result.url).filter((link) => search.types.includes(typeOfAddress(link))).map(rawAddress);
-            pages.forEach((outcome, index) => {
-                const address = opened[index].url;
-                // The model is told when a page gave no text, so it does not fill the gap from memory.
-                if (search.types.length === 0 && (outcome.status !== 'fulfilled' || !(outcome.value.content || '').trim())) {
-                    lines.push(`Found ${address} (its text was not loaded).`);
-                }
-                if (outcome.status !== 'fulfilled') return;
-                const page = outcome.value;
-                const direct = typeOfContent(page.file);
-                if (direct && search.types.includes(direct) && !files.some((file) => file.url === address)) {
-                    files.push({ url: address, type: direct });
-                    keep({ url: address });
-                }
-                page.links.forEach((link) => known.add(link));
-                page.media.forEach((link) => known.add(link));
-                candidates.push(...[...page.links, ...page.embedded].filter((link) => search.types.includes(typeOfAddress(link))).map(rawAddress));
-                page.embedded.filter((link) => search.types.includes(typeOfAddress(link))).forEach((link) => known.add(link));
-                if (search.types.some((type) => MEDIA_TYPES.includes(type))) candidates.push(...page.media);
-                if (search.types.length === 0 && page.content) lines.push(`Text of ${address}:`, clip(page.content, 2500));
-            });
-            if (search.types.length > 0) {
-                const unique = [...new Set(candidates)].filter((link) => !files.some((file) => file.url === link)).slice(0, CHECKS_PER_SEARCH);
-                const checked = (await Promise.all(unique.map((link) => checkOnce(link, search.types)))).filter(Boolean);
-                checked.forEach((file) => keep(file));
-                files.push(...checked);
-            }
-            return true;
-        };
-
-        const ran = await look(search.query);
-        if (ran && search.types.length > 0 && files.length === 0 && !stopped()) await look(`${search.query} filetype:${search.types[0]}`);
-        if (!ran) {
-            sections.push(`SEARCH: ${search.query}\n${limited ? 'The search service is limiting requests right now, so this search could not be run.' : 'This search could not be run, so nothing was found for it.'}`);
-            return;
-        }
-        if (search.types.length > 0) {
-            lines.push(`Files found (${search.types.join(', ')}; each one was loaded successfully; use these in src):`);
-            lines.push(...(files.length > 0 ? files.slice(0, FILES_PER_SEARCH).map((file) => `- ${file.url} (${file.type})`) : ['- none']));
-        }
-        if (search.types.length === 0 && !lines.some((line) => line.startsWith('Text of '))) lines.push('The pages below are the result of this search. Their text was not loaded, so give the pages themselves to the user as links. Do not say that nothing was found, and do not write their content from memory.');
-        if (search.types.length === 0) {
-            pagesSeen.slice(0, PAGES_TO_READ).filter((page) => !sources.some((known) => known.url === page.url)).forEach((page) => sources.push({ title: page.title, url: page.url }));
-        }
-        lines.push('Pages (web pages, never for src; give as links, [title](address)):', ...pagesSeen.slice(0, PAGES_LISTED).map((result) => `- ${clip(result.title, 100)} | ${result.url} | ${clip(result.content, 160).replace(/\s+/g, ' ')}`));
-        sections.push(lines.join('\n'));
-    };
-    const runPage = async (target) => {
-        if (stopped()) return;
-        note('web_fetch', target.url);
-        let page;
-        try {
-            page = await openPage(target.url);
-        } catch {
-            sections.push(`PAGE: ${target.url}\nThis page could not be opened.`);
-            return;
-        }
-        page.links.forEach((link) => known.add(link));
-        page.media.forEach((link) => known.add(link));
-        const lines = [`PAGE: ${target.url}`];
-        if (target.types.length === 0) {
-            if (page.content) lines.push('Text of this page:', clip(page.content, 2500));
-            sections.push(lines.join('\n'));
-            return;
-        }
-        const direct = typeOfContent(page.file);
-        const files = direct && target.types.includes(direct) ? [{ url: target.url, type: direct }] : [];
-        files.forEach((file) => keep(file));
-        const candidates = [...page.links, ...page.embedded].filter((link) => target.types.includes(typeOfAddress(link))).map(rawAddress);
-        if (target.types.some((type) => MEDIA_TYPES.includes(type))) candidates.push(...page.media);
-        const checked = (await Promise.all([...new Set(candidates)].slice(0, CHECKS_PER_SEARCH).map((link) => checkOnce(link, target.types)))).filter(Boolean);
-        checked.forEach((file) => keep(file));
-        files.push(...checked);
-        lines.push(`Files found on this page (${target.types.join(', ')}; each one was loaded successfully; use these in src):`);
-        lines.push(...(files.length > 0 ? files.slice(0, FILES_PER_SEARCH).map((file) => `- ${file.url} (${file.type})`) : ['- none']));
-        sections.push(lines.join('\n'));
-    };
-    for (const search of searches) await runSearch(search);
-
-    const useful = (section) => /^- https\S* \(\w+\)$/m.test(section) || /^Text of /m.test(section);
-    const resultsText = () => {
-        const whole = sections.join('\n\n');
-        if (whole.length <= MAX_RESULTS_CHARS) return whole;
-        const shorter = sections.map((section) => (useful(section) ? section : section.split('\n').filter((line, index) => index === 0 || /^Files found|^- none$|^This /.test(line)).join('\n')));
-        return clip(shorter.join('\n\n'), MAX_RESULTS_CHARS);
-    };
-    const gained = () => usable.size + sections.filter((section) => /^Text of /m.test(section)).length;
-
-    const ran = searches.map((search) => search.query);
-    const usedWords = new Set(ran.flatMap(queryWords));
-    const differs = (query) => {
-        const words = queryWords(query);
-        if (words.filter((word) => !usedWords.has(word)).length < MIN_NEW_WORDS) return false;
-        return ran.every((earlier) => {
-            const other = new Set(queryWords(earlier));
-            const shared = words.filter((word) => other.has(word)).length;
-            return shared / new Set([...words, ...other]).size < MAX_SHARED_WORDS;
-        });
-    };
-    let idle = 0;
-    let checkFrom = 0;
-    for (let round = 0; round < DEEPER_ROUNDS && idle < IDLE_ROUNDS && sections.slice(checkFrom).some((section) => !useful(section)) && !limited && !stopped(); round++) {
-        const review = await ask(REVIEW_FORMAT, REVIEW_GUIDE, `THE USER'S MESSAGE\n${question}\n\nFOUND SO FAR\n\n${resultsText()}\n\nSEARCHES ALREADY RUN\n${ran.map((query) => `- ${query}`).join('\n')}\n\nWORDS ALREADY SEARCHED\n${[...usedWords].join(', ')}`);
-        if (review.enough !== false) break;
-        const more = [];
-        for (const search of cleanSearches(review.searches)) {
-            if (more.length >= MAX_DEEPER || !differs(search.query)) continue;
-            more.push(search);
-            ran.push(search.query);
-            queryWords(search.query).forEach((word) => usedWords.add(word));
-        }
-        const pages = (Array.isArray(review.pages) ? review.pages : [])
-            .map((page) => ({ url: String(page?.url ?? '').trim(), types: cleanTypes(page?.fileTypes) }))
-            .filter((page, index, all) => /^https:\/\//i.test(page.url) && known.has(page.url) && !openedPages.has(page.url) && all.findIndex((other) => other.url === page.url) === index)
-            .slice(0, MAX_DEEPER);
-        if (more.length === 0 && pages.length === 0) break;
-        pages.forEach((page) => openedPages.add(page.url));
-        checkFrom = sections.length;
-        const before = gained();
-        for (const search of more) await runSearch(search);
-        for (const page of pages) await runPage(page);
-        idle = gained() > before ? 0 : idle + 1;
-    }
-    return { known, usable, sources, text: sections.length > 0 ? `WEB RESULTS\n\n${resultsText()}` : '' };
-};
-
 const runTurn = async ({ chat, body, userId, res, live }) => {
     if (!body.regenerate && body.editIndex === undefined && chat.messages.length >= MAX_CHAT_MESSAGES) {
         if (res) sendOllamaError(res, new OllamaError('CHAT_FULL'));
@@ -2394,50 +2069,17 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         if (gone) return;
         const loaded = await ollama.running().then((list) => list.models.some((entry) => entry.name === chat.model)).catch(() => true);
         write({ type: 'start', sharing: queue.runningIn(lane) - 1, loaded });
-        const searchOn = webSearchReady() && chat.webSearch !== false && currentTarget().kind !== 'cloud';
-        const appSearch = searchOn && process.env.WEB_SEARCH_MODE !== 'tools';
-        const searching = searchOn && !appSearch && facts.capabilities.includes('tools');
+        // Web search is two tools, handed to a model that can use tools when the chat has search on. The model decides
+        // when to use them; nothing of Mollama's own is added to tell it how.
+        const searching = webSearchReady() && chat.webSearch !== false && facts.capabilities.includes('tools');
         const messages = [...prompt];
-        if (searching) messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, SEARCH_GUIDE) };
         const chatTools = facts.capabilities.includes('tools') ? await toolsForChat(chat, userId) : [];
-        if (chatTools.length > 0) messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, TOOLS_GUIDE) };
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
-            return Number(chat.options?.num_ctx) > 0 ? capacity : Math.min(capacity, searching || appSearch ? Math.max(fitted, SEARCH_CONTEXT) : fitted);
+            return Number(chat.options?.num_ctx) > 0 ? capacity : Math.min(capacity, searching ? Math.max(fitted, SEARCH_CONTEXT) : fitted);
         };
-        const searchCtx = sizeFor(messages, Math.ceil(MAX_RESULTS_CHARS / 4));
-        let found = null;
-        if (appSearch) {
-            try {
-                found = await Promise.race([stopSignal.then(() => null), gatherWeb({
-                    ollama,
-                    chat,
-                    facts,
-                    keepAlive: `${settings.keepAliveMinutes}m`,
-                    numCtx: searchCtx,
-                    prefix: messages.slice(0, -1),
-                    tools: chatTools.map((tool) => ({ label: tool.label, description: tool.definition.function.description })),
-                    write,
-                    steps: reply.steps,
-                    stopped: () => gone,
-                    track: (planning) => {
-                        stream = planning;
-                        if (gone) planning.abort?.();
-                    }
-                })]);
-            } catch (error) {
-                logger.warn('[Chat] Web results could not be gathered', { message: String(error?.message || '').slice(0, 200) });
-            }
-            const last = messages[messages.length - 1];
-            // The rules for using web results are added only when there are results, so a reply that needed no search
-            // is not shaped by them.
-            if (found?.text && last?.role === 'user') {
-                messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, RESULTS_GUIDE) };
-                messages[messages.length - 1] = { role: 'user', content: `${found.text}\n\nTHE USER'S MESSAGE\n${last.content}` };
-            }
-        }
-        const numCtx = appSearch ? searchCtx : sizeFor(messages);
+        const numCtx = sizeFor(messages);
         let evalCount = 0;
         let evalSeconds = 0;
         let totalMs = 0;
@@ -2524,17 +2166,6 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
             tokensPerSecond: evalSeconds > 0 && evalCount ? Math.round((evalCount / evalSeconds) * 10) / 10 : null
         };
         if (gone) reply.stopped = true;
-        // The pages a web answer rests on are always given to the user: when the model left them out, they are added.
-        if (found?.sources?.length > 0 && reply.content && !gone && !found.sources.some((page) => reply.content.includes(page.url))) {
-            const listed = found.sources.slice(0, PAGES_LISTED).map((page) => `- [${clip(page.title, 100).replace(/[\[\]]/g, '') || hostName(page.url)}](${page.url})`);
-            const added = `\n\nSources:\n${listed.join('\n')}`;
-            reply.content += added;
-            write({ type: 'token', text: added });
-        }
-        if (found) {
-            const used = [...reply.content.matchAll(/\bsrc\s*=\s*"(https?:\/\/[^"]+)"/g)].map((match) => match[1]);
-            reply.unverified = [...new Set(used.filter((address) => !found.usable.has(address)))];
-        }
     };
 
     try {
@@ -2705,8 +2336,7 @@ export const loadModel = asyncHandler(async (req, res) => {
         const loading = !loaded && !busy && settings.keepAliveMinutes > 0;
         if (loading) {
             const facts = await modelFacts(ollama, model);
-            const appSearch = webSearchReady() && process.env.WEB_SEARCH_MODE !== 'tools';
-            const numCtx = Math.min(facts.contextLength, AUTO_CONTEXT_LIMIT, appSearch ? SEARCH_CONTEXT : CONTEXT_STEPS[0]);
+            const numCtx = Math.min(facts.contextLength, AUTO_CONTEXT_LIMIT, webSearchReady() ? SEARCH_CONTEXT : CONTEXT_STEPS[0]);
             ollama.load(model, `${settings.keepAliveMinutes}m`, numCtx).catch((error) => {
                 logger.warn('[Models] Model could not be loaded ahead of time', { model, code: mapOllamaError(error).code });
             });
@@ -3273,7 +2903,6 @@ export const removeProvider = asyncHandler(async (req, res) => {
 });
 
 // Tools a chat has switched on. Built-in ones are functions here; the rest come from the person's tool servers.
-export const TOOLS_GUIDE = fs.readFileSync(path.join(INSTRUCTIONS, 'tools.md'), 'utf8').trim();
 const MAX_CHAT_TOOLS = 40;
 const TOOL_RESULT_CHARS = 20000;
 const TOOL_CALLS_AN_HOUR = 120;

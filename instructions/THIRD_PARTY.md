@@ -58,6 +58,12 @@ https://github.com/lucasmarkes/hairline
 
 2 skills, in `library/hairline`. Licence: MIT. Copyright (c) 2026 Lucas Marques.
 
+## ItzCrazyKns/Perplexica and miurla/morphic
+
+https://github.com/ItzCrazyKns/Perplexica (MIT, Copyright (c) 2026 ItzCrazyKns) and https://github.com/miurla/morphic (Apache License 2.0)
+
+1 skill, in `library/search`: Web Search. Unlike the other skills it is not a copy. It is written for Mollama's two search tools and follows two published prompts: when to search and how to make a search stand on its own follow Perplexica's search classifier; how to answer from results follows Morphic's quick search mode, without its fixed headings, its citation on every sentence and its closing summary.
+
 ## MIT License
 
 Applies to every project above marked MIT, each under its own copyright line.
