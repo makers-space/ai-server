@@ -14,7 +14,7 @@ import {
     OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
-    TOOL_HEALTH, TOOL_CATALOGUE, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
+    TOOL_HEALTH, TOOL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
 } from '../middleware/ai.middleware.js';
 
 const MB = 1024 * 1024;
@@ -2820,7 +2820,7 @@ const findToolServer = async (req, res) => {
 };
 
 export const listToolCatalogue = asyncHandler(async (req, res) => {
-    res.status(200).json({ success: true, apps: TOOL_CATALOGUE });
+    res.status(200).json({ success: true, apps: TOOL_CATALOGUE.map((entry) => ({ ...entry, keyNeeded: toolKeyNeeded(entry) })) });
 });
 
 export const listToolServers = asyncHandler(async (req, res) => {
@@ -2840,6 +2840,9 @@ export const addToolServer = asyncHandler(async (req, res) => {
         if (await ToolServer.exists({ service: SERVICE, owner: req.user.id, device, localId })) return res.status(409).json({ success: false, message: 'That tool server is already added.' });
         Object.assign(fields, { device, localId });
     } else {
+        if (!key && toolKeyNeeded(listedTool(address))) {
+            return res.status(422).json({ success: false, message: 'This app needs a key here.', action: 'Follow the steps shown to get a free key, then add it.' });
+        }
         Object.assign(fields, { address, signIn: key ? 'key' : 'none', sealed: seal(key ? { key } : { redirect: toolCallbackUrl(req) }) });
     }
     const server = await checkToolServer(await ToolServer.create(fields));

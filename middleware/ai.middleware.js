@@ -1248,6 +1248,7 @@ export const TOOL_HEALTH = {
     signin: { label: 'Sign-in needed', needs: ['Sign in to this app, so Mollama can use it on your behalf.'] },
     refused: { label: 'Access refused', needs: ['The key or sign-in was not accepted. Sign in again, or replace the key.'] },
     unreachable: { label: 'Cannot be reached', needs: ['The address has to be the tool server address exactly as the app gives it.', 'The tool server has to be up. If it was working before, try again in a few minutes.'] },
+    busy: { label: 'Busy right now', needs: ['This app is limiting how many requests it takes, so it will work again shortly.', 'If it keeps happening, add your own key for this app: your use then counts against your own allowance.'] },
     blocked: { label: 'Address not allowed', needs: ['Remote tools need a public address that starts with https.', 'For an app on your own computer, add it under Local tools instead.'] },
     empty: { label: 'No tools offered', needs: ['The server answered but offered no tools. Your account there may need a plan or permission that includes them.'] },
     offline: { label: 'Computer offline', needs: ['That computer has to be on, with the Mollama desktop app open and signed in.'] },
@@ -1318,7 +1319,7 @@ const openRemote = async (address, options) => {
         await first.connect(new StreamableHTTPClientTransport(url, options));
         return first;
     } catch (error) {
-        if (error instanceof UnauthorizedError || error instanceof OllamaError || [401, 403].includes(error?.status)) throw error;
+        if (error instanceof UnauthorizedError || error instanceof OllamaError || [401, 403, 429].includes(error?.status)) throw error;
         const older = new Client(TOOL_CLIENT);
         try {
             await older.connect(new SSEClientTransport(url, options));
@@ -1360,8 +1361,19 @@ export const accountKeeper = (kept, redirectUrl) => ({
     }
 });
 
+// On the hosted sites every request leaves from one address, so an app that takes no sign-in would count everyone
+// against one allowance. There, an app that offers free keys needs one; on a person's own computer it stays optional.
+const hosted = () => process.env.NODE_ENV === 'production';
+export const toolKeyNeeded = (entry) => Boolean(entry) && (entry.signIn === 'key' || (entry.signIn === 'none' && Boolean(entry.key) && hosted()));
+export const listedTool = (address) => TOOL_CATALOGUE.find((entry) => entry.address === address) || null;
+// Most apps take a key as a bearer token; a listed app that wants it under another name says so.
+const keyHeaders = (address, key) => {
+    const header = listedTool(address)?.key?.header;
+    return header ? { [header]: key } : { Authorization: `Bearer ${key}` };
+};
+
 export const withToolServer = async ({ address, key = null, keeper = null }, work) => {
-    const options = { fetch: guardedFetch, ...(key ? { requestInit: { headers: { Authorization: `Bearer ${key}` } } } : keeper ? { authProvider: keeper } : {}) };
+    const options = { fetch: guardedFetch, ...(key ? { requestInit: { headers: keyHeaders(address, key) } } : keeper ? { authProvider: keeper } : {}) };
     const client = await toolConnector(address, options);
     try {
         return await work(client);
@@ -1386,6 +1398,7 @@ export const readTools = async (client) => {
 export const toolFault = (error, withKey = false) => {
     if (error instanceof UnauthorizedError || error?.status === 401) return withKey ? 'refused' : 'signin';
     if (error?.status === 403) return 'refused';
+    if (error?.status === 429) return 'busy';
     if (error instanceof OllamaError && error.code === 'REMOTE_BLOCKED') return 'blocked';
     return 'unreachable';
 };
@@ -1424,7 +1437,15 @@ export const TOOL_CATALOGUE = [
     app('Supabase', 'Code', 'https://mcp.supabase.com/mcp', 'Manage projects, run queries and read logs'),
     app('Neon', 'Code', 'https://mcp.neon.tech/mcp', 'Manage Postgres projects and run queries'),
     app('PostHog', 'Code', 'https://mcp.posthog.com/mcp', 'Ask about product analytics, flags and errors'),
-    app('Context7', 'Code', 'https://mcp.context7.com/mcp', 'Fetch current documentation for code libraries', 'none'),
+    app('Context7', 'Code', 'https://mcp.context7.com/mcp', 'Fetch current documentation for code libraries', 'none', {
+        page: 'https://context7.com/dashboard?tab=settings',
+        cost: 'Free: 1,000 requests a month with a free account.',
+        steps: [
+            'Open the key page and sign up or sign in to Context7.',
+            'In the API Keys card, choose Create API Key. Leave Write access unticked.',
+            'Copy the key straight away and paste it into the Key box here. Context7 shows it only once.'
+        ]
+    }),
     app('DeepWiki', 'Code', 'https://mcp.deepwiki.com/mcp', 'Ask questions about public GitHub repositories', 'none'),
     app('Miro', 'Design', 'https://mcp.miro.com/', 'Read and create board content and diagrams'),
     app('Webflow', 'Design', 'https://mcp.webflow.com/mcp', 'Edit sites, pages and collection items'),
@@ -1432,9 +1453,34 @@ export const TOOL_CATALOGUE = [
     app('WordPress.com', 'Design', 'https://public-api.wordpress.com/wpcom/v2/mcp/v1', 'Manage posts, pages and site settings'),
     app('Calendly', 'Messages and customers', 'https://mcp.calendly.com', 'Read availability and scheduled events'),
     app('Stripe', 'Payments and shops', 'https://mcp.stripe.com', 'Manage customers, invoices and subscriptions'),
-    app('Hugging Face', 'Search and data', 'https://huggingface.co/mcp', 'Search models, datasets, Spaces and papers', 'none'),
-    app('Exa', 'Search and data', 'https://mcp.exa.ai/mcp', 'Search the web and read pages', 'none'),
-    app('Firecrawl', 'Search and data', 'https://mcp.firecrawl.dev/v2/mcp', 'Search, scrape and read web pages', 'none'),
+    app('Hugging Face', 'Search and data', 'https://huggingface.co/mcp', 'Search models, datasets, Spaces and papers', 'none', {
+        page: 'https://huggingface.co/settings/tokens',
+        cost: 'Free with any Hugging Face account.',
+        steps: [
+            'Open the key page while signed in to Hugging Face. Hugging Face calls the key an access token.',
+            'Choose New token, give it a name such as Mollama, and pick the Read role.',
+            'Create it, copy it, and paste it into the Key box here.'
+        ]
+    }),
+    app('Exa', 'Search and data', 'https://mcp.exa.ai/mcp', 'Search the web and read pages', 'none', {
+        page: 'https://dashboard.exa.ai/api-keys',
+        cost: 'Free: Exa gives every account credits each month.',
+        header: 'x-api-key',
+        steps: [
+            'Open the key page and sign up or sign in to Exa.',
+            'Under API Keys, create a key.',
+            'Copy it and paste it into the Key box here.'
+        ]
+    }),
+    app('Firecrawl', 'Search and data', 'https://mcp.firecrawl.dev/v2/mcp', 'Search, scrape and read web pages', 'none', {
+        page: 'https://www.firecrawl.dev/app/api-keys',
+        cost: 'Free: 1,000 credits with a free account.',
+        steps: [
+            'Open the key page and sign up or sign in to Firecrawl.',
+            'Create a key, or copy the one already there.',
+            'Paste it into the Key box here.'
+        ]
+    }),
     app('Tavily', 'Search and data', 'https://mcp.tavily.com/mcp/', 'Search the web and pull out page content'),
     app('Zapier', 'Automation', 'https://mcp.zapier.com/api/v1/connect', 'Run actions across thousands of connected apps'),
     app('Make', 'Automation', 'https://mcp.make.com/v2', 'Run and manage automation scenarios')
