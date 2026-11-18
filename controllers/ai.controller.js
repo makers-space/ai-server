@@ -1492,12 +1492,15 @@ const applyQueueSettings = async () => {
 
 const modelFacts = async (ollama, name) => {
     const shown = await ollama.show(name);
-    return { contextLength: contextLength(shown) || 4096, capabilities: shown.capabilities || [] };
+    return { contextLength: contextLength(shown) || 4096, capabilities: shown.capabilities || [], online: Object.keys(shown?.model_info || {}).some((key) => key.startsWith('cloud.')) };
 };
 
+// How much a model may be given to read. A model on a computer is held to a limit that protects the computer's memory;
+// an online model reads as much as its service says it can.
 const capacityFor = (chat, facts) => {
     const chosen = Number(chat.options?.num_ctx) || 0;
-    return chosen > 0 ? Math.min(chosen, facts.contextLength) : Math.min(facts.contextLength, AUTO_CONTEXT_LIMIT);
+    if (chosen > 0) return Math.min(chosen, facts.contextLength);
+    return facts.online ? facts.contextLength : Math.min(facts.contextLength, AUTO_CONTEXT_LIMIT);
 };
 
 // What the models are told lives in server/instructions, and all of it is skills a chat turns on or off: skills/ holds
@@ -1668,17 +1671,49 @@ const skillFileTool = (withFiles) => {
             function: {
                 name: 'open_skill_file',
                 description: `Read one of the files that belong to a skill of this chat, such as a rules page, an example or the code its instructions name. Read a file when the skill's instructions tell you to.\n${withFiles.map((skill) => `- ${skill.id}: ${skill.files.map((file) => file.path).join(', ')}`).join('\n')}`,
-                parameters: { type: 'object', properties: { skill: { type: 'string', enum: withFiles.map((skill) => skill.id), description: 'The skill the file belongs to' }, file: { type: 'string', description: 'The path of the file, as listed' } }, required: ['skill', 'file'] }
+                parameters: { type: 'object', properties: { skill: { type: 'string', enum: withFiles.map((skill) => skill.id), description: 'The skill the file belongs to' }, file: { type: 'string', description: 'The path of the file, as listed' }, until: { type: 'string', description: 'Optional. Read only the start of the file, up to the first line that contains this text. Use it when the instructions say to read only the top of a file.' } }, required: ['skill', 'file'] }
             }
         },
         run: async (input) => {
             const skill = find(input);
-            const text = skill ? skillFileText(skill, input?.file) : null;
+            const whole = skill ? skillFileText(skill, input?.file) : null;
+            const stop = typeof input?.until === 'string' && input.until.trim() ? input.until.trim() : null;
+            const lines = whole === null ? [] : whole.split('\n');
+            const end = stop ? lines.findIndex((line) => line.includes(stop)) : -1;
+            const text = whole !== null && end > 0 ? lines.slice(0, end).join('\n') : whole;
             if (text !== null) return { content: text };
             return { content: skill ? `That skill has no file by that name. Its files are: ${skill.files.map((file) => file.path).join(', ')}.` : `There is no skill by that name with files in this chat. The skills with files are: ${withFiles.map((one) => one.id).join(', ')}.`, failed: 'failed' };
         }
     };
 };
+// What a skill's instructions ask an agent to do with a command, Mollama does itself where it can: one function for
+// one command, offered while the skill is on, doing exactly what that command does and nothing more. No script of a
+// skill is run on the server.
+const SKILL_FUNCTIONS = {
+    'hairline-hairline-create': [{
+        name: 'hairline_build',
+        label: 'Hairline build',
+        description: 'Does what `node build.mjs <name>.js` does in the Hairline skill, without Node: puts your figure on the bench (bench.html with kernel.js and the figure in their two slots, nothing else changed) and shows the finished page to the user in the chat. Give the whole figure file. Use this instead of asking the user to run anything. There is no browser for you to look with here, so look.mjs cannot be run: say plainly that the look was not done.',
+        parameters: { type: 'object', properties: { code: { type: 'string', description: 'The whole figure file as you would save it in <name>.js, ending with its hairline({ ... }) call' } }, required: ['code'] },
+        run: (input, { show }) => {
+            const code = String(input?.code ?? '').replace(/\r\n/g, '\n').trim();
+            const call = [...code.matchAll(/\bhairline\s*\(\s*\{/g)].at(-1);
+            if (!call) return { content: 'Nothing was built. A figure file ends with hairline({ name, means, rules, range, tour, mount }).', failed: 'failed' };
+            if (code.includes('```')) return { content: 'Nothing was built. The figure must not contain three backticks in a row.', failed: 'failed' };
+            const name = /\bname:\s*["'`]([a-z][a-z0-9-]*)["'`]/.exec(code.slice(call.index))?.[1] || 'figure';
+            show(['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n'));
+            return { content: `Built hairline-${name}.html and showed it to the user in the chat. You cannot see the page from here.` };
+        }
+    }]
+};
+const skillFunctionsFor = (chat) => skillsOf(chat).flatMap((skill) => (SKILL_FUNCTIONS[skill.id] || []).map((entry) => ({
+    fn: entry.name,
+    label: entry.label,
+    changes: false,
+    shown: () => skill.name,
+    definition: { type: 'function', function: { name: entry.name, description: entry.description, parameters: entry.parameters } },
+    run: async (input, context) => entry.run(input, context)
+})));
 // The level above a chat's own skills is the whole library, searched by a few words. A model cannot turn a skill on:
 // it names the one that would help, and the person turns it on.
 const LIBRARY_STEP = 'Skill library';
@@ -2235,13 +2270,19 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
         const draws = drawsComponents(chat);
         const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0) : [];
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
             return Number(chat.options?.num_ctx) > 0 ? capacity : Math.min(capacity, searching ? Math.max(fitted, SEARCH_CONTEXT) : fitted);
         };
         // Room is kept for the largest skill that may be opened, so opening one never overflows what the model can read.
+        // A function may put something into the reply itself, such as a page it built for the person to see.
+        const show = (block) => {
+            const text = `${reply.content && !/\n\n$/.test(reply.content) ? '\n\n' : ''}${block}\n\n`;
+            reply.content += text;
+            write({ type: 'token', text });
+        };
         const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
         let evalCount = 0;
         let evalSeconds = 0;
@@ -2266,6 +2307,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 stream = await ollama.chat(request, halt.signal);
                 if (gone) stream.abort?.();
                 for await (const part of stream) {
+                    // Nothing that arrives after Stop is kept or shown, even if the service had already sent it.
+                    if (gone) break;
                     if (part.message?.thinking) {
                         reply.thinking += part.message.thinking;
                         write({ type: 'thinking', text: part.message.thinking });
@@ -2280,7 +2323,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         evalCount += part.eval_count || 0;
                         evalSeconds += (part.eval_duration || 0) / 1e9;
                         totalMs += part.total_duration ? part.total_duration / 1e6 : 0;
-                        promptEvalCount = part.prompt_eval_count || promptEvalCount;
+                        // The first request of a reply holds the conversation alone. Later ones also hold what its tools
+                        // returned, which is gone once the reply is written, so they are not what the chat is measured by.
+                        promptEvalCount = promptEvalCount || part.prompt_eval_count || null;
                     }
                 }
                 if (calls.length === 0 && request.tools && !gone) {
@@ -2307,9 +2352,11 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     const step = { tool: mine ? mine.label : name, input, failed: null };
                     reply.steps.push(step);
                     write({ type: 'tool', tool: step.tool, input });
-                    const outcome = mine
-                        ? await runChatTool(mine, given, { chat, userId, write, stopped: () => gone })
-                        : await runSearchTool(name, input);
+                    // Stop does not wait for a tool that is still running: a search, a page being read, a question to the person.
+                    const outcome = await Promise.race([
+                        mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show }) : runSearchTool(name, input),
+                        stopSignal.then(() => ({ content: 'The reply was stopped.', failed: 'refused' }))
+                    ]);
                     if (outcome.failed) {
                         step.failed = outcome.failed;
                         write({ type: 'toolFailed', failed: outcome.failed });
@@ -3216,7 +3263,7 @@ export const answerPermission = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true });
 });
 
-const runChatTool = async (tool, input, { chat, userId, write, stopped }) => {
+const runChatTool = async (tool, input, { chat, userId, write, stopped, show }) => {
     try {
         if (!underLimit(userId)) return { content: 'The limit on tool use for this hour has been reached. Answer without tools and say so.', failed: 'limited' };
         if (tool.changes && !(chat.allowedTools || []).includes(tool.fn)) {
@@ -3225,7 +3272,7 @@ const runChatTool = async (tool, input, { chat, userId, write, stopped }) => {
             if (answer === 'no') return { content: 'The person did not allow this tool to run. Do not try another way to do the same thing; say that it was not done.', failed: 'refused' };
             if (answer === 'always') chat.allowedTools = [...(chat.allowedTools || []), tool.fn];
         }
-        return await tool.run(input);
+        return await tool.run(input, { show });
     } catch (error) {
         const code = mapOllamaError(error).code;
         logger.warn('[Chat] Tool failed', { tool: tool.fn, code });

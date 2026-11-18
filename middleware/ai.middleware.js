@@ -1072,7 +1072,9 @@ const SEARCH_SMALL_WORDS = new Set(['an', 'the', 'of', 'in', 'on', 'for', 'to', 
 let searchFetch = realFetch;
 
 export const setSearchFetch = (replacement) => {
+    const before = searchFetch;
     searchFetch = replacement || realFetch;
+    return before;
 };
 
 const searchKey = () => String(process.env.TAVILY_API_KEY || '').trim();
