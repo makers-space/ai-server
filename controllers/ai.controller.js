@@ -1544,8 +1544,6 @@ export const SKILL_SOURCES = {
     anatomy: { name: 'Anatomy', repo: 'wheresryan22/anatomy' },
     hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' }
 };
-// Library skills were written for agents that can run commands and open files. A chat here cannot, so the model is told.
-const AGENT_NOTE = 'This skill was written for an agent that can run commands and open files. In this chat you cannot: use its guidance, do every part you can in the conversation itself, and say plainly which steps need something you do not have. Never pretend to have run a command or read a file.';
 const LIBRARY = path.join(INSTRUCTIONS, 'library');
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
@@ -1562,7 +1560,7 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
         credit: `${SKILL_SOURCES[source].repo} (${facts.licence})`,
         source,
         needs,
-        text: [`SKILL: ${name}`, needs.length > 0 && AGENT_NOTE, text.slice(head?.[0].length || 0).trim()].filter(Boolean).join('\n\n'),
+        text: `SKILL: ${name}\n\n${text.slice(head?.[0].length || 0).trim()}`,
         touch: '',
         remember: ''
     };
@@ -1586,7 +1584,7 @@ const ownSkill = (doc) => {
     const needs = skillNeeds(doc.text);
     return {
         id: `mine-${doc.id}`, name: doc.name, description: doc.description || '', default: false, order: 200, credit: doc.address, source: 'mine', needs,
-        text: [`SKILL: ${doc.name}`, needs.length > 0 && AGENT_NOTE, doc.text].filter(Boolean).join('\n\n'), touch: '', remember: ''
+        text: `SKILL: ${doc.name}\n\n${doc.text}`, touch: '', remember: ''
     };
 };
 const ownSkillsOf = async (userId) => {
@@ -1600,6 +1598,42 @@ const ownSkillsOf = async (userId) => {
 };
 const skillsFor = (ownerId) => [...SKILLS, ...(ownSkillCache.get(String(ownerId))?.skills || [])];
 const skillsOf = (chat) => skillsFor(chat.owner).filter((skill) => (Array.isArray(chat.skills) ? chat.skills.includes(skill.id) : skill.default));
+// A model that can use tools is sent only the name and description of each skill its chat has on, inside one function,
+// and opens a skill with that function when a request fits it. A skill opened earlier in the chat is sent in full from
+// then on, and so is Mollama's own. A model that cannot use tools is sent every skill in full.
+const SKILL_STEP = 'Skill';
+const sortSkills = (chat, listing) => {
+    const active = skillsOf(chat);
+    if (!listing) return { full: active, listed: [] };
+    const opened = new Set(chat.messages.flatMap((message) => (message.steps || []).filter((step) => step.tool === SKILL_STEP && !step.failed).map((step) => step.input)));
+    const full = active.filter((skill) => skill.source === 'mollama' || opened.has(skill.name));
+    return { full, listed: active.filter((skill) => !full.includes(skill)) };
+};
+const openSkillTool = (listed) => {
+    const find = (input) => {
+        const wanted = String(input?.skill ?? '').trim().toLowerCase();
+        return listed.find((skill) => skill.name.toLowerCase() === wanted || skill.id === wanted);
+    };
+    return {
+        fn: 'open_skill',
+        label: SKILL_STEP,
+        changes: false,
+        shown: (input) => find(input)?.name || clip(String(input?.skill ?? ''), 80),
+        knows: (name) => Boolean(find({ skill: String(name).replace(/[_-]+/g, ' ') })),
+        definition: {
+            type: 'function',
+            function: {
+                name: 'open_skill',
+                description: `Open one of this chat's skills and get its full instructions. Open a skill before answering when the request matches its description.\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n')}`,
+                parameters: { type: 'object', properties: { skill: { type: 'string', enum: listed.map((skill) => skill.name), description: 'The name of the skill to open' } }, required: ['skill'] }
+            }
+        },
+        run: async (input) => {
+            const skill = find(input);
+            return skill ? { content: skill.text } : { content: `There is no skill by that name in this chat. The skills are: ${listed.map((one) => one.name).join(', ')}.`, failed: 'failed' };
+        }
+    };
+};
 // A skill may end with a reminder, which is put last so it is the last thing the model reads.
 const closingOf = (chat) => {
     const reminders = skillsOf(chat).map((skill) => skill.remember).filter(Boolean);
@@ -1744,9 +1778,9 @@ const touchAllowed = (chat) => {
 // prompt a computer has already read stays good for the rest of that day.
 export const todayLine = () => `Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })} (UTC).`;
 
-const buildMessages = (chat) => {
+const buildMessages = (chat, listing = false) => {
     const out = [];
-    const active = skillsOf(chat);
+    const active = sortSkills(chat, listing).full;
     const touch = active.some((skill) => skill.id === 'components') && touchAllowed(chat) && TOUCH_GUIDE;
     const system = [...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
@@ -1773,7 +1807,7 @@ const contextUse = (chat, facts) => {
     const pending = chat.attachments.filter((attachment) => !attachment.sent).reduce((sum, attachment) => sum + attachment.tokens, 0);
     const last = [...chat.messages].reverse().find((message) => message.role === 'assistant' && message.stats?.promptEvalCount);
     const measured = last ? last.stats.promptEvalCount + (last.stats.evalCount || 0) : 0;
-    const used = Math.max(promptTokens(buildMessages(chat)), measured) + pending;
+    const used = Math.max(promptTokens(buildMessages(chat, facts.capabilities.includes('tools'))), measured) + pending;
     const percent = Math.min(100, Math.round((used / capacity) * 100));
     return { usedTokens: used, capacityTokens: capacity, percent, warn: percent >= CONTEXT_WARN_PERCENT };
 };
@@ -1997,7 +2031,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         if (!chat.model) chat.model = await chooseModel(ollama, userId);
         facts = await modelFacts(ollama, chat.model);
 
-        prompt = buildMessages(chat);
+        prompt = buildMessages(chat, facts.capabilities.includes('tools'));
         const needed = promptTokens(prompt) + REPLY_RESERVE;
         if (needed > capacityFor(chat, facts)) {
             const lastUser = chat.messages[chat.messages.length - 1];
@@ -2076,13 +2110,15 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         // when to use them; nothing of Mollama's own is added to tell it how.
         const searching = webSearchReady() && chat.webSearch !== false && facts.capabilities.includes('tools');
         const messages = [...prompt];
-        const chatTools = facts.capabilities.includes('tools') ? await toolsForChat(chat, userId) : [];
+        const { listed } = sortSkills(chat, facts.capabilities.includes('tools'));
+        const chatTools = facts.capabilities.includes('tools') ? [...(listed.length > 0 ? [openSkillTool(listed)] : []), ...await toolsForChat(chat, userId)] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
             return Number(chat.options?.num_ctx) > 0 ? capacity : Math.min(capacity, searching ? Math.max(fitted, SEARCH_CONTEXT) : fitted);
         };
-        const numCtx = sizeFor(messages);
+        // Room is kept for the largest skill that may be opened, so opening one never overflows what the model can read.
+        const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), 0));
         let evalCount = 0;
         let evalSeconds = 0;
         let totalMs = 0;
@@ -2138,13 +2174,17 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 messages.push({ role: 'assistant', content: said, tool_calls: calls });
                 for (const call of calls) {
                     const name = String(call.function?.name || '');
-                    const mine = chatTools.find((tool) => tool.fn === name);
-                    const input = mine ? clip(JSON.stringify(toolArguments(call.function?.arguments)), 500) : toolInput(name, call.function?.arguments);
+                    // A small model sometimes calls a skill by its own name instead of through the function that opens it.
+                    const opener = chatTools.find((tool) => tool.fn === 'open_skill');
+                    const slip = Boolean(opener) && !SEARCH_TOOLS.some((tool) => tool.function.name === name) && !chatTools.some((tool) => tool.fn === name) && opener.knows(name);
+                    const mine = slip ? opener : chatTools.find((tool) => tool.fn === name);
+                    const given = slip ? { skill: name.replace(/[_-]+/g, ' ') } : toolArguments(call.function?.arguments);
+                    const input = mine?.shown ? mine.shown(given) : mine ? clip(JSON.stringify(given), 500) : toolInput(name, call.function?.arguments);
                     const step = { tool: mine ? mine.label : name, input, failed: null };
                     reply.steps.push(step);
                     write({ type: 'tool', tool: step.tool, input });
                     const outcome = mine
-                        ? await runChatTool(mine, toolArguments(call.function?.arguments), { chat, userId, write, stopped: () => gone })
+                        ? await runChatTool(mine, given, { chat, userId, write, stopped: () => gone })
                         : await runSearchTool(name, input);
                     if (outcome.failed) {
                         step.failed = outcome.failed;
