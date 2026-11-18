@@ -864,7 +864,9 @@ export const connectDevice = (ws) => deviceGateway.handleConnection(ws, async (h
     return device.id;
 });
 
-const announceDevice = (online) => async (deviceId) => {
+const announceDevice = (online) => async (deviceId, hello, replaced = false) => {
+    // A computer that reconnects while still counted as online has not changed, so nobody is told.
+    if (replaced) return;
     try {
         const device = await Device.findOne({ _id: deviceId, service: SERVICE });
         if (!device?.registeredBy) return;
@@ -919,6 +921,10 @@ export const testConnection = asyncHandler(async (req, res) => {
 
 export const getSetupStatus = asyncHandler(async (req, res) => {
     const target = currentTarget();
+    // An online service is not a computer: it counts as ready, and its own state is shown on the Models page.
+    if (target.kind === 'cloud') {
+        return res.status(200).json({ success: true, ready: target.id, account: { available: true }, ollama: { available: true, version: null, modelCount: 0 }, device: null, steps: { ollama: true, device: true, model: true } });
+    }
     const device = await getCurrentDevice();
     const reachable = Boolean(device) && isOnline(device);
     const ollama = reachable ? await readOllama(await getOllama()) : UNREACHED;

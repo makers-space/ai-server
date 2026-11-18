@@ -363,7 +363,7 @@ export class DeviceGateway extends EventEmitter {
         ws.on('error', () => {});
 
         this.send(entry, { type: 'welcome' });
-        this.emit('online', deviceId, hello);
+        this.emit('online', deviceId, hello, Boolean(earlier));
     }
 
     send(entry, message) {
