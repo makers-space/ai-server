@@ -1524,7 +1524,6 @@ const OWN_SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((fil
         source: 'mollama',
         needs: [],
         text: guide.body,
-        touch: guide.part('TOUCH'),
         remember: guide.part('REMEMBER')
     };
 }).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
@@ -1561,7 +1560,6 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
         source,
         needs,
         text: `SKILL: ${name}\n\n${text.slice(head?.[0].length || 0).trim()}`,
-        touch: '',
         remember: ''
     };
 }));
@@ -1584,7 +1582,7 @@ const ownSkill = (doc) => {
     const needs = skillNeeds(doc.text);
     return {
         id: `mine-${doc.id}`, name: doc.name, description: doc.description || '', default: false, order: 200, credit: doc.address, source: 'mine', needs,
-        text: `SKILL: ${doc.name}\n\n${doc.text}`, touch: '', remember: ''
+        text: `SKILL: ${doc.name}\n\n${doc.text}`, remember: ''
     };
 };
 const ownSkillsOf = async (userId) => {
@@ -1620,6 +1618,7 @@ const openSkillTool = (listed) => {
         changes: false,
         shown: (input) => find(input)?.name || clip(String(input?.skill ?? ''), 80),
         knows: (name) => Boolean(find({ skill: String(name).replace(/[_-]+/g, ' ') })),
+        slip: (name) => ({ skill: String(name).replace(/[_-]+/g, ' ') }),
         definition: {
             type: 'function',
             function: {
@@ -1678,8 +1677,43 @@ const closingOf = (chat) => {
     return reminders.length > 0 ? ['REMEMBER', ...reminders].join('\n') : '';
 };
 
-export const TOUCH_GUIDE = SKILLS.find((skill) => skill.id === 'components').touch;
-const TOUCH_EVERY = 4;
+// Each component the chat can draw has its own page in instructions/components: every attribute, every value and what
+// each does on screen. The Components skill is only the index. A model that can use tools opens the page of the
+// component it is about to write, and the page is gone again once that reply is written: no page is ever sent ahead of
+// need, and none is carried into the next message. A model that cannot use tools has the index alone.
+export const COMPONENT_PAGES = fs.readdirSync(path.join(INSTRUCTIONS, 'components')).filter((file) => file.endsWith('.md')).sort().map((file) => ({
+    name: file.slice(0, -3),
+    text: fs.readFileSync(path.join(INSTRUCTIONS, 'components', file), 'utf8').replace(/\r\n/g, '\n').trim()
+}));
+const COMPONENT_STEP = 'Component';
+// Room kept for the pages of the few components one reply draws.
+const COMPONENT_ROOM = 3000;
+const namesIn = (text) => String(text ?? '').split(/[\s,]+/).filter(Boolean);
+const drawsComponents = (chat) => skillsOf(chat).some((skill) => skill.id === 'components');
+const openComponentTool = () => {
+    const find = (input) => namesIn(input?.component).map((name) => COMPONENT_PAGES.find((page) => page.name.toLowerCase() === name.toLowerCase()));
+    return {
+        fn: 'open_component',
+        label: COMPONENT_STEP,
+        changes: false,
+        shown: (input) => find(input).filter(Boolean).map((page) => page.name).join(', ') || clip(String(input?.component ?? ''), 80),
+        knows: (name) => COMPONENT_PAGES.some((page) => page.name.toLowerCase() === String(name).toLowerCase()),
+        slip: (name) => ({ component: name }),
+        definition: {
+            type: 'function',
+            function: {
+                name: 'open_component',
+                description: "Get the page for a component: every attribute it takes, every value, and what each does on screen. Open a component's page before you write that component.",
+                parameters: { type: 'object', properties: { component: { type: 'string', description: 'The name of the component, or several names separated by commas, such as Card, Badge' } }, required: ['component'] }
+            }
+        },
+        run: async (input) => {
+            const found = find(input);
+            if (found.length === 0 || found.some((page) => !page)) return { content: `There is no component by that name. The components are: ${COMPONENT_PAGES.map((page) => page.name).join(', ')}.`, failed: 'failed' };
+            return { content: found.map((page) => page.text).join('\n\n') };
+        }
+    };
+};
 
 const presentSkill = ({ id, name, description, default: on, credit, source, needs, text }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id) });
 export const listSkills = asyncHandler(async (req, res) => {
@@ -1806,12 +1840,6 @@ const systemText = (chat) => {
     return items.map((item) => `# ${item.name}\n\n${item.text}`).join('\n\n');
 };
 
-// The app, not the model, decides how often a decorative touch is allowed: only after several replies without any component.
-const touchAllowed = (chat) => {
-    const recent = chat.messages.filter((message) => message.role === 'assistant' && message.content).slice(-TOUCH_EVERY);
-    return recent.length === TOUCH_EVERY && recent.every((message) => !message.content.includes('```component'));
-};
-
 // Models do not know the date; without it they guess a year from their training. It changes once a day, so the
 // prompt a computer has already read stays good for the rest of that day.
 export const todayLine = () => `Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })} (UTC).`;
@@ -1819,8 +1847,7 @@ export const todayLine = () => `Today is ${new Date().toLocaleDateString('en-GB'
 const buildMessages = (chat, listing = false) => {
     const out = [];
     const active = sortSkills(chat, listing).full;
-    const touch = active.some((skill) => skill.id === 'components') && touchAllowed(chat) && TOUCH_GUIDE;
-    const system = [...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
+    const system = [...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
@@ -2152,14 +2179,15 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const { listed } = sortSkills(chat, facts.capabilities.includes('tools'));
         const on = new Set(skillsOf(chat).map((skill) => skill.id));
         const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
-        const chatTools = facts.capabilities.includes('tools') ? [...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const draws = drawsComponents(chat);
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
             return Number(chat.options?.num_ctx) > 0 ? capacity : Math.min(capacity, searching ? Math.max(fitted, SEARCH_CONTEXT) : fitted);
         };
         // Room is kept for the largest skill that may be opened, so opening one never overflows what the model can read.
-        const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), 0));
+        const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0));
         let evalCount = 0;
         let evalSeconds = 0;
         let totalMs = 0;
@@ -2216,10 +2244,10 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 for (const call of calls) {
                     const name = String(call.function?.name || '');
                     // A small model sometimes calls a skill by its own name instead of through the function that opens it.
-                    const opener = chatTools.find((tool) => tool.fn === 'open_skill');
-                    const slip = Boolean(opener) && !SEARCH_TOOLS.some((tool) => tool.function.name === name) && !chatTools.some((tool) => tool.fn === name) && opener.knows(name);
-                    const mine = slip ? opener : chatTools.find((tool) => tool.fn === name);
-                    const given = slip ? { skill: name.replace(/[_-]+/g, ' ') } : toolArguments(call.function?.arguments);
+                    const real = chatTools.find((tool) => tool.fn === name);
+                    const opener = real || SEARCH_TOOLS.some((tool) => tool.function.name === name) ? null : chatTools.find((tool) => tool.knows?.(name));
+                    const mine = real || opener;
+                    const given = opener ? opener.slip(name) : toolArguments(call.function?.arguments);
                     const input = mine?.shown ? mine.shown(given) : mine ? clip(JSON.stringify(given), 500) : toolInput(name, call.function?.arguments);
                     const step = { tool: mine ? mine.label : name, input, failed: null };
                     reply.steps.push(step);
