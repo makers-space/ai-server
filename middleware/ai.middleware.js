@@ -694,8 +694,13 @@ export const rankCatalogue = (catalogue, hardware) => {
     if (fast) fast.pick = 'fast';
     if (balanced) balanced.pick = 'balanced';
     if (best) best.pick = 'best';
+    // A fourth, for a particular kind of work: the largest model that still runs well here and is made for code,
+    // or failing that for reasoning.
+    const free = [...pool].reverse().filter((entry) => !entry.pick);
+    const special = free.find((entry) => entry.goodFor.includes('code')) || free.find((entry) => entry.goodFor.includes('reasoning')) || null;
+    if (special) special.pick = special.goodFor.includes('code') ? 'code' : 'reasoning';
 
-    const order = { fast: 0, balanced: 1, best: 2 };
+    const order = { fast: 0, balanced: 1, best: 2, code: 3, reasoning: 3 };
     return entries.sort((a, b) => {
         const pickA = a.pick ? order[a.pick] : 9;
         const pickB = b.pick ? order[b.pick] : 9;

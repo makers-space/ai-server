@@ -31,7 +31,7 @@ const hostName = (address) => {
 const CATALOGUE_PAGE = 48;
 const SAMPLE = { full: 6, mixed: 3, large: 3 };
 const POPULAR_MODELS = 40;
-const PICK_ORDER = { fast: 0, balanced: 1, best: 2 };
+const PICK_ORDER = { fast: 0, balanced: 1, best: 2, code: 3, reasoning: 3 };
 const CLOUD_FIT = { verdict: 'cloud', label: 'Cloud only', fits: false, memoryNeededMb: 0, tokensPerSecond: null };
 // The whole library, searched and ordered on the server and handed out a page at a time.
 // Recommendations come only from the most downloaded models, so an obscure model is never the suggestion.
@@ -72,7 +72,10 @@ const liveCatalogue = async (query, hardware) => {
             ...picked
         ];
     };
-    const shown = (all) => (sampled ? sample(all) : everything ? all : all.slice((page - 1) * size, page * size));
+    // The recommended models lead the first page and are not counted in the number shown per page.
+    const unpicked = (all) => all.filter((entry) => !entry.pick);
+    const shown = (all) => (sampled ? sample(all) : everything ? all
+        : [...(page === 1 ? all.filter((entry) => entry.pick) : []), ...unpicked(all).slice((page - 1) * size, page * size)]);
 
     // The page about to be shown gets its exact sizes, then the order is worked out again with them.
     await loadLibrarySizes(shown(order()).map((entry) => entry.tag.split(':')[0]));
@@ -89,7 +92,8 @@ const liveCatalogue = async (query, hardware) => {
         query: words.join(' '),
         page,
         size,
-        more: !everything && !sampled && page * size < all.length,
+        paged: unpicked(all).length,
+        more: !everything && !sampled && page * size < unpicked(all).length,
         local: all.filter((entry) => !entry.cloudOnly),
         total: all.length,
         library: models.length,
@@ -1283,6 +1287,7 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
         query: live.query,
         page: live.page,
         size: live.size,
+        paged: live.paged,
         more: live.more,
         total: live.total,
         library: live.library,
@@ -1316,6 +1321,7 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
         query: live.query,
         page: live.page,
         size: live.size,
+        paged: live.paged,
         more: live.more,
         total: live.total,
         library: live.library,
