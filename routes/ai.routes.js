@@ -4,7 +4,7 @@ import * as authMiddleware from '../middleware/auth.middleware.js';
 import { RIGHTS } from '../config/rights.js';
 import { noCacheResponse } from '../middleware/cache.middleware.js';
 import { validateRequest } from '../middleware/validation.middleware.js';
-import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas, toolSchemas } from '../models/ai.model.js';
+import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas, toolSchemas, providerSchemas } from '../models/ai.model.js';
 
 const router = Router();
 
@@ -52,6 +52,9 @@ router.validRoutes = [
     '/api/v1/files/text',
     '/api/v1/files/save',
     '/api/v1/files/remote',
+    '/api/v1/providers',
+    '/api/v1/providers/:id',
+    '/api/v1/providers/:id/check',
     '/api/v1/tools/catalogue',
     '/api/v1/tools/servers',
     '/api/v1/tools/servers/:id',
@@ -144,5 +147,12 @@ router.patch('/tools/servers/:id', ...signedIn, withToolServerId, validateReques
 router.delete('/tools/servers/:id', ...signedIn, withToolServerId, aiController.removeToolServer);
 router.post('/tools/servers/:id/check', ...signedIn, withToolServerId, aiController.checkToolServerNow);
 router.post('/tools/servers/:id/sign-in', ...signedIn, withToolServerId, aiController.startToolSignIn);
+
+const withProviderId = validateRequest(providerSchemas.providerId, 'params');
+router.get('/providers', ...signedIn, aiController.listProviders);
+router.post('/providers', ...signedIn, validateRequest(providerSchemas.add), aiController.addProvider);
+router.patch('/providers/:id', ...signedIn, withProviderId, validateRequest(providerSchemas.update), aiController.updateProvider);
+router.delete('/providers/:id', ...signedIn, withProviderId, aiController.removeProvider);
+router.post('/providers/:id/check', ...signedIn, withProviderId, aiController.checkProviderNow);
 
 export default router;

@@ -167,6 +167,26 @@ const ERROR_TABLE = {
         message: 'This computer is paused.',
         action: 'Resume it on the Devices page, or pick another computer.'
     },
+    KEY_REFUSED: {
+        status: 401,
+        message: 'The online service did not accept your key.',
+        action: 'Replace the key on the Models page, under Online.'
+    },
+    OUT_OF_CREDIT: {
+        status: 402,
+        message: 'Your account with this online service is out of credit or over its limit.',
+        action: 'Add credit with that service, or pick another model.'
+    },
+    PROVIDER_BUSY: {
+        status: 429,
+        message: 'The online service is taking too many requests right now.',
+        action: 'Try again in a moment.'
+    },
+    PROVIDER_DOWN: {
+        status: 503,
+        message: 'The online service could not be reached.',
+        action: 'Try again shortly, or pick another model.'
+    },
     DEVICE_OFFLINE: {
         status: 503,
         message: 'This device is not connected right now.',
@@ -1521,3 +1541,233 @@ export const TOOL_LOCAL_CATALOGUE = [
     local('Date and time', 'standard', 'uvx', 'mcp-server-time', 'Tell the time and convert between time zones', [UV]),
     local('Step-by-step thinking', 'standard', 'npx', '-y @modelcontextprotocol/server-sequential-thinking', 'A scratchpad for working through a problem in steps', [NODE])
 ];
+
+// Online model providers. Two of them, Ollama and OpenRouter, list their models to anyone, so listing does not prove
+// a key works; "proof" names an address of theirs that does.
+// A person adds their own key; the provider's models then sit beside the local ones.
+// Addresses and key pages were read from each provider's own documentation on 2026-11-18. "bare" providers are
+// sent nothing beyond the conversation, because they refuse sampling settings or extra fields.
+const keySteps = (maker, where) => [`Open the key page and sign up or sign in to ${maker}.`, where, 'Copy the key and paste it into the Key box here. Most services show it only once.'];
+const online = (id, name, base, does, page, cost, where, extra = {}) => ({ id, name, base, does, type: 'openai', key: { page, cost, steps: keySteps(name, where) }, ...extra });
+export const CLOUD_PROVIDERS = [
+    online('ollama', 'Ollama', 'https://ollama.com', 'The large open models in Ollama\'s library, such as Kimi, GLM and DeepSeek, run on Ollama\'s computers', 'https://ollama.com/settings/keys', 'Pay for what you use, at Ollama\'s prices. There is no free allowance.', 'Under Keys, add an API key.', { type: 'ollama', proof: { path: '/api/me', method: 'POST' } }),
+    online('anthropic', 'Anthropic', 'https://api.anthropic.com/v1', 'The Claude models', 'https://platform.claude.com/settings/keys', 'Paid by use. Separate from a Claude subscription.', 'Under API keys, create a key.', { bare: true }),
+    online('openai', 'OpenAI', 'https://api.openai.com/v1', 'The GPT models', 'https://platform.openai.com/api-keys', 'Paid by use. Separate from a ChatGPT subscription.', 'Under API keys, create a new secret key.'),
+    online('google', 'Google', 'https://generativelanguage.googleapis.com/v1beta/openai', 'The Gemini models', 'https://aistudio.google.com/apikey', 'Has a free allowance; paid beyond it.', 'Choose Create API key.'),
+    online('moonshot', 'Moonshot', 'https://api.moonshot.ai/v1', 'The Kimi models', 'https://platform.kimi.ai/console/api-keys', 'Paid by use.', 'Under API keys, create a key. Use the international site; keys from the China site do not work here.'),
+    online('deepseek', 'DeepSeek', 'https://api.deepseek.com', 'The DeepSeek models', 'https://platform.deepseek.com/api_keys', 'Paid by use.', 'Under API keys, create a key.'),
+    online('xai', 'xAI', 'https://api.x.ai/v1', 'The Grok models', 'https://console.x.ai/team/default/api-keys', 'Paid by use; add credit first.', 'Under API keys, create a key.'),
+    online('mistral', 'Mistral', 'https://api.mistral.ai/v1', 'The Mistral models', 'https://console.mistral.ai', 'Paid by use.', 'Under API keys, create a key.', { bare: true }),
+    online('openrouter', 'OpenRouter', 'https://openrouter.ai/api/v1', 'Hundreds of models from many companies behind one key', 'https://openrouter.ai/keys', 'Some models are free with daily limits; the rest are paid by use.', 'Choose Create key.', { proof: { path: '/key', method: 'GET' } }),
+    online('groq', 'Groq', 'https://api.groq.com/openai/v1', 'Open models, run very fast', 'https://console.groq.com/keys', 'Has a free plan with limits.', 'Choose Create API key.'),
+    online('cerebras', 'Cerebras', 'https://api.cerebras.ai/v1', 'Open models, run very fast', 'https://cloud.cerebras.ai', 'Has a free plan with lower limits.', 'Open API Keys in the menu and create a key.')
+];
+export const PROVIDER_HEALTH = {
+    healthy: { label: 'Ready', needs: [] },
+    unchecked: { label: 'Not checked yet', needs: ['Mollama has not checked this one yet. Choose Check.'] },
+    refused: { label: 'Key refused', needs: ['The service did not accept the key. Replace it with a new one from the key page.'] },
+    credit: { label: 'Out of credit', needs: ['Your account with this service is out of credit or over its limit. Add credit there.'] },
+    busy: { label: 'Busy right now', needs: ['The service is taking too many requests. It will work again shortly.'] },
+    unreachable: { label: 'Cannot be reached', needs: ['The service did not answer. Try again in a few minutes.'] },
+    empty: { label: 'No models offered', needs: ['The service answered but listed no chat models for this key.'] }
+};
+
+const realCloudFetch = (...args) => fetch(...args);
+let cloudFetch = realCloudFetch;
+export const setCloudFetch = (replacement = null) => {
+    cloudFetch = replacement || realCloudFetch;
+};
+
+const cloudFault = (status, text = '') => {
+    if (status === 401 || status === 403 || (status === 400 && /api key|invalid.{0,12}key|incorrect.{0,12}key/i.test(text))) return 'KEY_REFUSED';
+    if (status === 402 || (status === 429 && /insufficient|credit|balance|quota|billing|exceeded_current/i.test(text))) return 'OUT_OF_CREDIT';
+    if (status === 429 || status === 529) return 'PROVIDER_BUSY';
+    if (status === 404) return 'MODEL_NOT_FOUND';
+    if (status === 400 && /context|too long|too many tokens|maximum/i.test(text)) return 'TOO_LONG';
+    return 'PROVIDER_DOWN';
+};
+const NOT_FOR_CHAT = /embed|whisper|tts|dall-e|image|moderation|audio|realtime|transcri|rerank|guard|speech|video/i;
+const CLOUD_CONTEXT = 128000;
+
+const askCloud = async (entry, key, path, init = {}) => {
+    let response;
+    try {
+        response = await cloudFetch(`${entry.base}${path}`, { ...init, headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...(init.headers || {}) } });
+    } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        throw new OllamaError('PROVIDER_DOWN', error?.message);
+    }
+    if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new OllamaError(cloudFault(response.status, text), text.slice(0, 300));
+    }
+    return response;
+};
+
+// Turns the conversation the chat loop keeps, which is in Ollama's shape, into the shape most online services share.
+const toSharedShape = (messages) => {
+    const waiting = [];
+    let count = 0;
+    return messages.map((message) => {
+        if (message.role === 'tool') return { role: 'tool', tool_call_id: waiting.shift() || `call_${++count}`, content: String(message.content ?? '') };
+        if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+            const calls = message.tool_calls.map((call) => {
+                const id = `call_${++count}`;
+                waiting.push(id);
+                return { id, type: 'function', function: { name: call.function?.name, arguments: JSON.stringify(call.function?.arguments || {}) } };
+            });
+            return { role: 'assistant', content: message.content || '', tool_calls: calls };
+        }
+        if (message.role === 'user' && Array.isArray(message.images) && message.images.length > 0) {
+            return { role: 'user', content: [{ type: 'text', text: String(message.content ?? '') }, ...message.images.map((image) => ({ type: 'image_url', image_url: { url: `data:image/png;base64,${image}` } }))] };
+        }
+        return { role: message.role, content: String(message.content ?? '') };
+    });
+};
+const textOf = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.filter((piece) => piece?.type === 'text').map((piece) => piece.text || '').join('') : '');
+const thoughtOf = (delta) => delta.reasoning_content || delta.reasoning
+    || (Array.isArray(delta.reasoning_details) ? delta.reasoning_details.map((piece) => piece.text || '').join('') : '')
+    || (Array.isArray(delta.content) ? delta.content.filter((piece) => piece?.type === 'thinking').map((piece) => (Array.isArray(piece.thinking) ? piece.thinking.map((part) => part.text || '').join('') : '')).join('') : '');
+
+async function* sharedParts(response, started) {
+    const decoder = new TextDecoder();
+    const calls = new Map();
+    let usage = null;
+    let held = '';
+    for await (const chunk of response.body) {
+        held += decoder.decode(chunk, { stream: true });
+        const lines = held.split('\n');
+        held = lines.pop();
+        for (const line of lines) {
+            const data = line.startsWith('data:') ? line.slice(5).trim() : '';
+            if (!data || data === '[DONE]') continue;
+            let event;
+            try {
+                event = JSON.parse(data);
+            } catch {
+                continue;
+            }
+            if (event.error) throw new OllamaError(cloudFault(Number(event.error.code) || 500, JSON.stringify(event.error)), String(event.error.message || '').slice(0, 300));
+            if (event.usage) usage = event.usage;
+            const delta = event.choices?.[0]?.delta;
+            if (!delta) continue;
+            const thinking = thoughtOf(delta);
+            const content = textOf(delta.content);
+            if (thinking) yield { message: { thinking } };
+            if (content) yield { message: { content } };
+            for (const call of delta.tool_calls || []) {
+                const kept = calls.get(call.index ?? 0) || { name: '', text: '' };
+                calls.set(call.index ?? 0, { name: kept.name || call.function?.name || '', text: kept.text + (call.function?.arguments || '') });
+            }
+        }
+    }
+    if (calls.size > 0) {
+        yield { message: { tool_calls: [...calls.values()].map((call) => {
+            let input = {};
+            try {
+                input = JSON.parse(call.text || '{}');
+            } catch {
+                input = {};
+            }
+            return { function: { name: call.name, arguments: input } };
+        }) } };
+    }
+    yield { done: true, eval_count: usage?.completion_tokens || 0, prompt_eval_count: usage?.prompt_tokens || 0, total_duration: (Date.now() - started) * 1e6 };
+}
+
+// Stands where the Ollama client stands, so the chat loop runs an online model without knowing the difference.
+// "known" is the list of models read at the last check, used for what each model can take.
+export const createCloudClient = (entry, key, known = []) => {
+    const factsOf = (name) => known.find((model) => model.name === name) || null;
+    const shown = (name) => ({
+        capabilities: ['completion', 'tools', ...(factsOf(name)?.vision ? ['vision'] : [])],
+        model_info: { 'cloud.context_length': factsOf(name)?.contextLength || CLOUD_CONTEXT }
+    });
+    const common = {
+        host: entry.base,
+        status: async () => ({ available: Boolean(key), version: null }),
+        running: async () => ({ models: known.map((model) => ({ name: model.name })) }),
+        show: async (name) => shown(name),
+        load: async () => undefined,
+        unload: async () => undefined,
+        prove: async () => {
+            if (!entry.proof) return;
+            let response;
+            try {
+                response = await cloudFetch(`${entry.base}${entry.proof.path}`, {
+                    method: entry.proof.method,
+                    headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+                    ...(entry.proof.method === 'POST' ? { body: '{}' } : {}),
+                    signal: AbortSignal.timeout(15000)
+                });
+            } catch {
+                return;
+            }
+            if (response.status === 401 || response.status === 403) throw new OllamaError('KEY_REFUSED');
+        }
+    };
+
+    if (entry.type === 'ollama') {
+        const raw = () => new Ollama({ host: entry.base, fetch: cloudFetch, headers: { Authorization: `Bearer ${key}` } });
+        const call = async (run) => {
+            try {
+                return await run(raw());
+            } catch (error) {
+                if (error instanceof OllamaError || error?.name === 'AbortError') throw error;
+                throw new OllamaError(error?.status_code ? cloudFault(error.status_code, String(error.message || '')) : 'PROVIDER_DOWN', String(error?.message || '').slice(0, 300));
+            }
+        };
+        return {
+            ...common,
+            list: async () => {
+                const { models = [] } = await call((client) => client.list());
+                return { models: models.filter((model) => !(model.capabilities || []).includes('embedding')).map((model) => ({ ...model, cloud: { contextLength: null, vision: (model.capabilities || []).includes('vision') } })) };
+            },
+            chat: (request) => call((client) => client.chat({ model: request.model, messages: request.messages, stream: request.stream, ...(request.tools ? { tools: request.tools } : {}), ...(request.think === undefined ? {} : { think: request.think }) }))
+        };
+    }
+
+    return {
+        ...common,
+        list: async () => {
+            const body = await (await askCloud(entry, key, '/models', { signal: AbortSignal.timeout(20000) })).json();
+            const listed = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
+            return {
+                models: listed.filter((model) => model?.id && !NOT_FOR_CHAT.test(model.id)).map((model) => ({
+                    name: String(model.id).replace(/^models\//, ''),
+                    size: 0,
+                    details: {},
+                    cloud: {
+                        contextLength: model.context_length || model.context_window || model.max_input_tokens || model.max_context_length || null,
+                        vision: Boolean(model.supports_image_in || model.capabilities?.vision || model.capabilities?.image_input || model.architecture?.input_modalities?.includes?.('image') || model.input_modalities?.includes?.('image'))
+                    }
+                }))
+            };
+        },
+        chat: async (request) => {
+            const controller = new AbortController();
+            const started = Date.now();
+            const options = request.options || {};
+            const body = {
+                model: request.model,
+                messages: toSharedShape(request.messages),
+                stream: Boolean(request.stream),
+                ...(request.tools ? { tools: request.tools } : {}),
+                ...(entry.bare ? {} : {
+                    ...(request.stream ? { stream_options: { include_usage: true } } : {}),
+                    ...(typeof options.temperature === 'number' ? { temperature: options.temperature } : {}),
+                    ...(typeof options.top_p === 'number' ? { top_p: options.top_p } : {}),
+                    ...(Number.isInteger(options.seed) ? { seed: options.seed } : {})
+                })
+            };
+            const response = await askCloud(entry, key, '/chat/completions', { method: 'POST', body: JSON.stringify(body), signal: controller.signal });
+            if (!request.stream) {
+                const answer = await response.json();
+                return { message: { content: textOf(answer.choices?.[0]?.message?.content) }, eval_count: answer.usage?.completion_tokens || 0, prompt_eval_count: answer.usage?.prompt_tokens || 0 };
+            }
+            const parts = sharedParts(response, started);
+            parts.abort = () => controller.abort();
+            return parts;
+        }
+    };
+};

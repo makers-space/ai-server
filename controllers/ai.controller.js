@@ -9,11 +9,12 @@ import mongoose from 'mongoose';
 import logger from '../utils/app.logger.js';
 import { asyncHandler, getNotificationService } from '../middleware/app.middleware.js';
 import { hasRight, RIGHTS } from '../config/rights.js';
-import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer } from '../models/ai.model.js';
+import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
+    CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
 } from '../middleware/ai.middleware.js';
 
@@ -160,11 +161,18 @@ const targetPaused = () => {
 
 const currentLane = () => {
     const target = currentTarget();
-    return target.kind === 'companion' ? target.id : target.kind;
+    return target.kind === 'companion' ? target.id : target.kind === 'cloud' ? `cloud:${target.id}` : target.kind;
 };
 
 const getOllama = async () => {
     const target = currentTarget();
+    if (target.kind === 'cloud') {
+        const provider = await Provider.findOne({ _id: target.id, service: SERVICE }).select('+sealed');
+        const entry = CLOUD_PROVIDERS.find((one) => one.id === provider?.kind);
+        const key = provider ? unseal(provider.sealed)?.key : null;
+        if (!entry || !key) return createOllamaClient(DEVICE_HOST, () => Promise.reject(new OllamaError('KEY_REFUSED')));
+        return createCloudClient(entry, key, provider.models);
+    }
     if (target.kind === 'companion' && pausedDevices.has(target.id)) return createOllamaClient(DEVICE_HOST, () => Promise.reject(new OllamaError('DEVICE_PAUSED')));
     if (target.kind === 'companion') return createOllamaClient(DEVICE_HOST, deviceGateway.fetcher(target.id));
     if (target.kind === 'none') return createOllamaClient(DEVICE_HOST, () => Promise.reject(new OllamaError('NO_DEVICE')));
@@ -624,7 +632,7 @@ const getLocalDevice = async ({ redetect = false } = {}) => {
 const getCurrentDevice = async () => {
     const target = currentTarget();
     if (target.kind === 'companion') return Device.findOne({ _id: target.id, service: SERVICE });
-    if (target.kind === 'none') return null;
+    if (target.kind === 'none' || target.kind === 'cloud') return null;
     return getLocalDevice();
 };
 
@@ -683,6 +691,7 @@ const pickTarget = async (userId, wanted) => {
         const device = await Device.findOne({ _id: wanted, service: SERVICE });
         if (device?.kind === 'companion' && String(device.registeredBy) === String(userId)) return targetOf(device);
         if (device?.kind === 'local' && localEnabled()) return LOCAL_TARGET;
+        if (!device && await Provider.exists({ _id: wanted, service: SERVICE, owner: userId })) return { kind: 'cloud', id: String(wanted) };
     }
     if (localEnabled()) return LOCAL_TARGET;
     const own = await ownDevices(userId);
@@ -717,8 +726,11 @@ export const listDevices = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         success: true,
-        devices: await Promise.all(devices.map(async (device) => presentDevice(device, await ollamaOf(device)))),
-        current: target.kind === 'companion' ? target.id : local?.id ?? null,
+        devices: [
+            ...await Promise.all(devices.map(async (device) => presentDevice(device, await ollamaOf(device)))),
+            ...(req.query?.with === 'online' ? (await Provider.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 })).map(presentOnlineDevice) : [])
+        ],
+        current: target.kind === 'companion' || target.kind === 'cloud' ? target.id : local?.id ?? null,
         permissions: { manage: canManage(req) }
     });
 });
@@ -968,7 +980,19 @@ const describeInstalled = async (ollama, model, personalByName) => {
     };
 };
 
+// The models of an online provider, in the same shape as the models on a computer so the picker needs no second path.
+const listOnlineModels = async (req, res) => {
+    const provider = await Provider.findOne({ _id: currentTarget().id, service: SERVICE });
+    const models = (provider?.models || []).map((model) => ({
+        name: model.name, displayName: model.name, description: '', sizeBytes: 0, family: null, parameterSize: null, quantization: null,
+        contextLength: model.contextLength || null, capabilities: ['completion', 'tools', ...(model.vision ? ['vision'] : [])], modifiedAt: null, personal: false,
+        fit: { verdict: 'cloud', label: 'Online', fits: true }, ready: true, canChat: true, usedBy: []
+    }));
+    res.status(200).json({ success: true, ollamaAvailable: provider?.health === 'healthy', ollamaVersion: null, webSearch: false, models, disk: { usedByModelsMb: 0, freeMb: 0, totalMb: 0 }, online: true, permissions: { manage: false } });
+};
+
 export const listModels = asyncHandler(async (req, res) => {
+    if (currentTarget().kind === 'cloud') return listOnlineModels(req, res);
     const ollama = await getOllama();
     const status = await ollama.status();
     const disk = await diskNow();
@@ -1661,6 +1685,7 @@ export const listChats = asyncHandler(async (req, res) => {
 // A chat runs on the computer it was given; without one it follows the request, and remembers a linked computer.
 const chatTarget = async (req, chat) => {
     const device = chat.device ? await allowedDevice(req, chat.device) : null;
+    if (!device && chat.device && await Provider.exists({ _id: chat.device, service: SERVICE, owner: req.user.id })) return { kind: 'cloud', id: String(chat.device) };
     return device ? targetOf(device) : currentTarget();
 };
 
@@ -1668,8 +1693,9 @@ const chatTarget = async (req, chat) => {
 const setChatDevice = async (req, chat) => {
     if (!('device' in (req.body || {}))) return true;
     const device = req.body.device ? await allowedDevice(req, req.body.device) : null;
-    if (req.body.device && !device) return false;
-    chat.device = device ? device._id : null;
+    const online = req.body.device && !device ? await Provider.exists({ _id: req.body.device, service: SERVICE, owner: req.user.id }) : null;
+    if (req.body.device && !device && !online) return false;
+    chat.device = device ? device._id : online ? online._id : null;
     return true;
 };
 
@@ -2132,7 +2158,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         if (gone) return;
         const loaded = await ollama.running().then((list) => list.models.some((entry) => entry.name === chat.model)).catch(() => true);
         write({ type: 'start', sharing: queue.runningIn(lane) - 1, loaded });
-        const searchOn = webSearchReady() && chat.webSearch !== false;
+        const searchOn = webSearchReady() && chat.webSearch !== false && currentTarget().kind !== 'cloud';
         const appSearch = searchOn && process.env.WEB_SEARCH_MODE !== 'tools';
         const searching = searchOn && !appSearch && facts.capabilities.includes('tools');
         const messages = [...prompt];
@@ -2918,4 +2944,83 @@ export const finishToolServerSignIn = asyncHandler(async (req, res) => {
     server.sealed = seal(kept);
     await checkToolServer(server);
     back(server.health === 'healthy' ? 'done' : 'failed');
+});
+
+const MAX_PROVIDERS = 20;
+const presentProvider = (provider) => ({
+    id: provider.id,
+    kind: provider.kind,
+    name: provider.name,
+    modelCount: provider.models.length,
+    models: provider.models.slice(0, 300).map((model) => model.name),
+    health: { state: provider.health, label: PROVIDER_HEALTH[provider.health].label, needs: PROVIDER_HEALTH[provider.health].needs, checkedAt: provider.checkedAt }
+});
+// How a connected provider appears among the computers a chat can use.
+function presentOnlineDevice(provider) {
+    return {
+        id: provider.id, name: `${provider.name} (online)`, kind: 'cloud', service: SERVICE, online: true, lastSeenAt: provider.checkedAt, hardware: null, detected: null,
+        overrides: {}, paused: false, edited: false, ollama: { available: provider.health === 'healthy', version: null, modelCount: provider.models.length }
+    };
+}
+const PROVIDER_FAULTS = { KEY_REFUSED: 'refused', OUT_OF_CREDIT: 'credit', PROVIDER_BUSY: 'busy' };
+
+// Reads the provider's list of models with the person's key, which also proves the key works.
+const checkProvider = async (provider) => {
+    const entry = CLOUD_PROVIDERS.find((one) => one.id === provider.kind);
+    try {
+        const client = createCloudClient(entry, unseal(provider.sealed)?.key);
+        await client.prove();
+        const { models } = await client.list();
+        provider.models = models.slice(0, 500).map((model) => ({ name: model.name, contextLength: model.cloud?.contextLength || null, vision: Boolean(model.cloud?.vision) }));
+        provider.health = provider.models.length > 0 ? 'healthy' : 'empty';
+    } catch (error) {
+        provider.health = PROVIDER_FAULTS[mapOllamaError(error).code] || 'unreachable';
+    }
+    provider.checkedAt = new Date();
+    await provider.save();
+    return provider;
+};
+
+const findProvider = async (req, res) => {
+    const provider = await Provider.findOne({ _id: req.params.id, service: SERVICE, owner: req.user.id }).select('+sealed');
+    if (!provider) res.status(404).json({ success: false, message: 'Online service not found' });
+    return provider;
+};
+
+export const listProviders = asyncHandler(async (req, res) => {
+    const providers = await Provider.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
+    res.status(200).json({
+        success: true,
+        providers: providers.map(presentProvider),
+        suggested: CLOUD_PROVIDERS.map(({ id, name, does, key }) => ({ id, name, does, key }))
+    });
+});
+
+export const addProvider = asyncHandler(async (req, res) => {
+    const entry = CLOUD_PROVIDERS.find((one) => one.id === req.body.kind);
+    if (!entry) return res.status(404).json({ success: false, message: 'That online service is not one Mollama knows.' });
+    if (await Provider.exists({ service: SERVICE, owner: req.user.id, kind: entry.id })) return res.status(409).json({ success: false, message: `${entry.name} is already connected.`, action: 'Replace its key instead.' });
+    if (await Provider.countDocuments({ service: SERVICE, owner: req.user.id }) >= MAX_PROVIDERS) return res.status(422).json({ success: false, message: 'You have reached the limit of online services.' });
+    const provider = await checkProvider(await Provider.create({ owner: req.user.id, kind: entry.id, name: entry.name, sealed: seal({ key: req.body.key }) }));
+    res.status(201).json({ success: true, provider: presentProvider(provider) });
+});
+
+export const checkProviderNow = asyncHandler(async (req, res) => {
+    const provider = await findProvider(req, res);
+    if (!provider) return;
+    res.status(200).json({ success: true, provider: presentProvider(await checkProvider(provider)) });
+});
+
+export const updateProvider = asyncHandler(async (req, res) => {
+    const provider = await findProvider(req, res);
+    if (!provider) return;
+    provider.sealed = seal({ key: req.body.key });
+    res.status(200).json({ success: true, provider: presentProvider(await checkProvider(provider)) });
+});
+
+export const removeProvider = asyncHandler(async (req, res) => {
+    const provider = await findProvider(req, res);
+    if (!provider) return;
+    await provider.deleteOne();
+    res.status(200).json({ success: true, message: 'Online service removed.' });
 });

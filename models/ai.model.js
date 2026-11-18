@@ -327,6 +327,30 @@ export const toolSchemas = {
     callback: Joi.object({ state: Joi.string().max(200), code: Joi.string().max(4000), iss: Joi.string().max(1000) }).unknown(true)
 };
 
+export const PROVIDER_HEALTH_STATES = ['unchecked', 'healthy', 'refused', 'credit', 'busy', 'unreachable', 'empty'];
+
+// A company that runs models online, connected by one person with their own key. The key is kept sealed.
+const providerSchema = new mongoose.Schema({
+    service: { type: String, default: SERVICE, immutable: true, index: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    kind: { type: String, required: true },
+    name: { type: String, required: true },
+    sealed: { type: String, default: null, select: false },
+    models: { type: [new mongoose.Schema({ name: String, contextLength: Number, vision: Boolean }, { _id: false })], default: [] },
+    health: { type: String, enum: PROVIDER_HEALTH_STATES, default: 'unchecked' },
+    checkedAt: { type: Date, default: null }
+}, { timestamps: true });
+providerSchema.index({ service: 1, owner: 1, kind: 1 }, { unique: true });
+
+export const Provider = mongoose.models.Provider || mongoose.model('Provider', providerSchema);
+
+const providerKey = Joi.string().trim().min(8).max(4000).required();
+export const providerSchemas = {
+    providerId: Joi.object({ id: Joi.objectId().required() }),
+    add: Joi.object({ kind: Joi.string().pattern(/^[a-z]{2,20}$/).required(), key: providerKey }),
+    update: Joi.object({ key: providerKey })
+};
+
 const generationOptions = Joi.object({
     temperature: Joi.number().min(0).max(2),
     num_ctx: Joi.number().integer().min(512).max(262144),
