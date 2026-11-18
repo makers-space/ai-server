@@ -124,7 +124,7 @@ TAGS THAT GO INSIDE OTHERS
 | `<Row />` | Data | one per record; every attribute is a column, such as task="Design" |
 | `<Column />` | Data, before the Rows | key (the Row attribute it styles), label (header text), as (Badge, ProgressBar or Typography), colors (for Badge, pairs like "Open:success, Late:error") |
 | `<Node />` | Flow | id (required), label (required; may use Markdown such as **bold**, lists and links, with each new line written as &#10;), color (COLOR), shape (rectangle, circle, diamond, cylinder) |
-| `<Edge />` | Flow | source and target (required, each the id of a Node), label (short; may use Markdown such as *italic*) |
+| `<Edge />` | Flow | source and target (required, each the id of a Node), label |
 | `<Item label="..." />` | TreeView, or another Item | label |
 | `<Option value="..." label="..." />` | Select | value, label |
 
