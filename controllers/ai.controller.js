@@ -40,6 +40,14 @@ const liveCatalogue = async (query, hardware) => {
     const words = String(query?.q || '').toLowerCase().split(/\s+/).filter(Boolean);
     const page = Number(query?.page) || 1;
     const size = Number(query?.size) || CATALOGUE_PAGE;
+    // How the list under the recommendations is ordered; the recommendations themselves always come first.
+    const ORDERS = {
+        largest: (a, b) => (b.sizeMb || 0) - (a.sizeMb || 0),
+        smallest: (a, b) => (a.sizeMb || 0) - (b.sizeMb || 0),
+        popular: (a, b) => (b.pulls || 0) - (a.pulls || 0),
+        name: (a, b) => String(a.tag).localeCompare(String(b.tag))
+    };
+    const chosenOrder = ORDERS[query?.sort] || null;
     const popular = new Set([...models].sort((a, b) => b.pulls - a.pulls).slice(0, POPULAR_MODELS).map((model) => model.name));
     const matching = models.filter((model) => words.every((word) => `${model.name} ${model.description}`.toLowerCase().includes(word)));
     await loadLibrarySizes(matching.filter((model) => popular.has(model.name)).map((model) => model.name));
@@ -51,6 +59,7 @@ const liveCatalogue = async (query, hardware) => {
             ? [...rankCatalogue(entries.filter(isPopular), hardware), ...entries.filter((entry) => !isPopular(entry)).map((entry) => ({ ...entry, fit: entry.cloudOnly ? CLOUD_FIT : fitModel(entry, hardware), pick: null }))]
             : entries.map((entry) => ({ ...entry, fit: null, pick: null }));
         return all.sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
+            || (chosenOrder ? chosenOrder(a, b) || a.parameters - b.parameters : 0)
             || Number(a.cloudOnly) - Number(b.cloudOnly)
             || Number(b.fit?.fits ?? true) - Number(a.fit?.fits ?? true)
             || b.pulls - a.pulls

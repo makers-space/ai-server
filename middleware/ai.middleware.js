@@ -683,7 +683,9 @@ export const rankCatalogue = (catalogue, hardware) => {
     pool = pool.filter((entry) => lowestSpeed(entry) >= 3).sort(byParameters);
     const base = pool.some(general) ? pool.filter(general) : pool;
 
-    const fast = base[0] || null;
+    // The fastest pick is the smallest model of at least a billion parameters, so it is quick and still useful;
+    // smaller ones are listed but not recommended.
+    const fast = base.find((entry) => entry.parameters >= 1) || base[0] || null;
     const carried = entries
         .filter((entry) => entry.fit.verdict === 'mixed' && entry.moe && !pool.includes(entry))
         .sort((x, y) => byParameters(y, x));
@@ -699,6 +701,28 @@ export const rankCatalogue = (catalogue, hardware) => {
     const free = [...pool].reverse().filter((entry) => !entry.pick);
     const special = free.find((entry) => entry.goodFor.includes('code')) || free.find((entry) => entry.goodFor.includes('reasoning')) || null;
     if (special) special.pick = special.goodFor.includes('code') ? 'code' : 'reasoning';
+
+    // Each pick carries its name and the numbers it was chosen on: how much memory it needs, how much this computer has
+    // for models, and the expected speed. The speed is an estimate from the model's size and where it runs, not a measurement.
+    const gpuMb = Number(hardware?.gpuMemoryMb) || 0;
+    const usableGpu = gpuMb > 0 ? Math.max(0, gpuMb - GPU_HEADROOM_MB) : 0;
+    const usableRam = Math.max(0, (Number(hardware?.memoryMb) || 0) - (hardware?.gpuShared ? gpuMb : 0) - RAM_RESERVE_MB);
+    const gb = (mb) => `${(mb / 1024).toFixed(mb >= 10240 ? 0 : 1)} GB`;
+    const room = (entry) => (entry.fit.verdict === 'gpu' ? `${gb(usableGpu)} of graphics memory` : entry.fit.verdict === 'mixed' ? `${gb(usableGpu + usableRam)} of graphics and system memory` : `${gb(usableRam)} of system memory`);
+    const speed = (entry) => (entry.fit.tokensPerSecond ? `about ${entry.fit.tokensPerSecond[0]} to ${entry.fit.tokensPerSecond[1]} tokens a second` : 'speed unknown');
+    const needs = (entry) => `needs ${gb(entry.fit.memoryNeededMb)} of the ${room(entry)} this computer has free for models`;
+    const PICKS = {
+        fast: ['Fastest', (entry) => `The smallest capable model that runs fully here: ${speed(entry)}; ${needs(entry)}.`],
+        balanced: ['Best balance', (entry) => `The largest model that still answers quickly: ${speed(entry)}; ${needs(entry)}.`],
+        best: ['Best quality', (entry) => `The largest model this computer can run: ${needs(entry)}; ${speed(entry)}.`],
+        code: ['Best for code', (entry) => `The largest model made for code that runs well here: ${speed(entry)}; ${needs(entry)}.`],
+        reasoning: ['Best at reasoning', (entry) => `The largest reasoning model that runs well here: ${speed(entry)}; ${needs(entry)}.`]
+    };
+    for (const entry of entries) {
+        if (!entry.pick) continue;
+        entry.pickLabel = PICKS[entry.pick][0];
+        entry.pickWhy = PICKS[entry.pick][1](entry);
+    }
 
     const order = { fast: 0, balanced: 1, best: 2, code: 3, reasoning: 3 };
     return entries.sort((a, b) => {

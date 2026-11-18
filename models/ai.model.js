@@ -185,6 +185,7 @@ export const modelSchemas = {
         q: Joi.string().trim().max(60).allow(''),
         page: Joi.number().integer().min(1).max(500),
         size: Joi.number().valid(4, 8, 12, 24, 48),
+        sort: Joi.string().valid('fit', 'largest', 'smallest', 'popular', 'name'),
         all: Joi.boolean(),
         sample: Joi.boolean(),
         shared: Joi.boolean()
