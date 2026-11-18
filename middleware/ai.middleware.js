@@ -1485,3 +1485,39 @@ export const TOOL_CATALOGUE = [
     app('Zapier', 'Automation', 'https://mcp.zapier.com/api/v1/connect', 'Run actions across thousands of connected apps'),
     app('Make', 'Automation', 'https://mcp.make.com/v2', 'Run and manage automation scenarios')
 ];
+
+// Tool servers that run on a person's own computer, offered as suggestions. Each start command was read from the
+// project's own instructions on 2026-11-18. "by" says who makes the server: the app's maker, the group behind the
+// tool-server standard, or the community. A part in <angle brackets> is for the person to fill in before adding.
+const NODE = 'Node.js has to be installed on this computer.';
+const UV = 'uv, a small Python tool runner, has to be installed on this computer.';
+const local = (name, by, command, args, does, needs, caution = null, only = null) => ({ name, by, command, args, does, needs, caution, only });
+export const TOOL_LOCAL_CATALOGUE = [
+    local('Blender', 'community', 'uvx', 'mcp-for-blender', 'Inspect and build 3D scenes, and import or generate assets',
+        [UV, 'Blender has to be open.', 'Its add-on has to be installed once (run "uvx mcp-for-blender setup" in a terminal) and switched on in Blender.', 'In Blender, press N in the 3D view, open the MCP for Blender tab and choose Start MCP Server.'],
+        'It can run code inside Blender. Made by the community, not by Blender.'),
+    local('Chrome DevTools', 'maker', 'npx', '-y chrome-devtools-mcp@latest', 'Control and inspect Chrome: pages, console, network and speed',
+        [NODE, 'Google Chrome has to be installed.'], 'It shows the model what is in the browser it controls.'),
+    local('Playwright', 'maker', 'npx', '-y @playwright/mcp@latest', 'Drive a browser: open pages, click, type and read them',
+        [NODE], 'It controls a real browser on this computer and keeps its sign-ins between uses.'),
+    local('Docker', 'maker', 'docker', 'mcp gateway run', 'Use every tool server switched on in Docker Desktop',
+        ['Docker Desktop has to be installed and running, with its MCP Toolkit switched on.']),
+    local('Xcode', 'maker', 'xcrun', 'mcpbridge', 'Change and build the project open in Xcode',
+        ['Xcode has to be open with your project.', 'In Xcode, Settings, Intelligence, allow external agents to use Xcode tools.'], 'It can change your project.', 'macOS'),
+    local('Godot', 'community', 'npx', '-y @coding-solo/godot-mcp', 'Open the Godot editor, run projects and build scenes',
+        [NODE, 'Godot has to be installed.'], 'It can run your Godot projects. Made by the community.'),
+    local('FreeCAD', 'community', 'uvx', 'freecad-mcp', 'Create and edit CAD objects',
+        [UV, 'FreeCAD has to be open.', 'Its add-on has to be copied into FreeCAD once, then started from the MCP Addon workbench with Start RPC Server.'], 'It can run code inside FreeCAD. Made by the community.'),
+    local('Ableton Live', 'community', 'uvx', 'ableton-mcp', 'Create tracks and clips, edit notes and control playback',
+        [UV, 'Ableton Live has to be open.', 'Its remote script has to be installed once (run "uvx --from ableton-mcp ableton-mcp-install-script" in a terminal), then chosen as a Control Surface in Live settings.'], 'Save your work first. Made by the community, not by Ableton.'),
+    local('Files on this computer', 'standard', 'npx', '-y @modelcontextprotocol/server-filesystem <folder>', 'Read, write and search files in a folder you choose',
+        [NODE, 'Replace <folder> with the full path of the folder to share.'], 'It can read and change every file in that folder.'),
+    local('Excel files', 'community', 'uvx', 'excel-mcp-server stdio --allow-dir <folder>', 'Read and write workbooks, formulas and charts without opening Excel',
+        [UV, 'Replace <folder> with the full path of the folder that holds your workbooks.'], 'It can change the workbooks in that folder. Made by the community.'),
+    local('Git', 'standard', 'uvx', 'mcp-server-git --repository <folder>', 'Read history, search and commit in a repository',
+        [UV, 'Git has to be installed.', 'Replace <folder> with the full path of the repository.'], 'It can make commits in that repository.'),
+    local('Fetch a web page', 'standard', 'uvx', 'mcp-server-fetch', 'Fetch a web page from this computer and read it as text', [UV]),
+    local('Memory', 'standard', 'npx', '-y @modelcontextprotocol/server-memory', 'Remember facts between chats in a file on this computer', [NODE]),
+    local('Date and time', 'standard', 'uvx', 'mcp-server-time', 'Tell the time and convert between time zones', [UV]),
+    local('Step-by-step thinking', 'standard', 'npx', '-y @modelcontextprotocol/server-sequential-thinking', 'A scratchpad for working through a problem in steps', [NODE])
+];
