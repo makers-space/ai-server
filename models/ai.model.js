@@ -184,7 +184,7 @@ export const modelSchemas = {
         gpuMemoryMb: megabytes,
         q: Joi.string().trim().max(60).allow(''),
         page: Joi.number().integer().min(1).max(500),
-        size: Joi.number().valid(12, 24, 48, 96),
+        size: Joi.number().valid(4, 8, 12, 24, 48),
         all: Joi.boolean(),
         sample: Joi.boolean(),
         shared: Joi.boolean()
