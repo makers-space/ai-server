@@ -4,6 +4,8 @@ A sealed frame in the reply that shows a web page you write. The page is a real 
 
 The frame is cut off from everything around it. The page cannot load or send anything over the network, so **everything it needs must be inside its own text**: styles in `<style>`, scripts written inline in `<script>` (module scripts work), pictures as inline SVG or `data:` addresses, and only the fonts the device already has. A `<script src="https://...">`, a stylesheet link or a web picture will not load. The page has no access to the chat, the user's account or stored data, and links in it do not open.
 
+**The app's colours.** The user picks a theme for the app, light or dark, with its own colours. The page is given that theme as variables, so it can match: `--app-background` (the page colour), `--app-surface` (the colour of panels), `--app-text`, `--app-border`, `--app-primary`, `--app-secondary`, `--app-tertiary`, `--app-neutral`, `--app-success`, `--app-warning`, `--app-error`, `--app-contrast` (for text on a filled colour) and `--app-font`. Write them as `var(--app-text)` in the page's styles. A page that sets its own fixed colours will look out of place in another theme, so build with these.
+
 The page is drawn once, when your reply is complete. While you are still writing, the user sees "Building the page…".
 
 Written in one of two ways.
@@ -14,7 +16,10 @@ Written in one of two ways.
 <Frame height="320px" title="Counter">
 <!doctype html>
 <html>
-<head><style>body { font: 16px system-ui; display: grid; place-items: center; height: 100vh; margin: 0; }</style></head>
+<head><style>
+  body { font: 16px var(--app-font); background: var(--app-background); color: var(--app-text); display: grid; place-items: center; height: 100vh; margin: 0; }
+  button { font: inherit; padding: 8px 16px; border: 1px solid var(--app-primary); border-radius: 8px; background: var(--app-surface); color: var(--app-primary); }
+</style></head>
 <body>
 <button id="b">Clicked 0 times</button>
 <script>
@@ -25,7 +30,7 @@ Written in one of two ways.
 </html>
 </Frame>
 ```
-A button in the middle of the frame that counts its clicks. A fragment without `<html>` works too: it is put inside a blank page.
+A button in the middle of the frame, in the app's own colours, that counts its clicks. A fragment without `<html>` works too: it is put inside a blank page.
 
 **A page built from a skill's files.** Some skills ship a page with places left to fill, each marked in the file as `/*NAME*/`. Name that file as the template and give one Part for each marker:
 
@@ -45,6 +50,7 @@ That takes page.html from the skill some-skill, puts the skill's engine.js where
 | height | a CSS length with its unit, such as 520px | How tall the frame is. Default 520px. It is always as wide as the reply, and the page scrolls inside it when it is taller. |
 | title | text | A name for the frame, read out by screen readers. It is not shown. |
 | template | skill/file, such as some-skill/page.html | One of a skill's files, used as the page. Its `/*NAME*/` markers are filled by the Parts. Without it, the text between the tags is the page. |
+| palette | pairs such as "ground:background, ink:text, faint:text 60%" | For a template that has colour variables of its own: gives each one a colour of the app's theme. Each pair is the template's variable (without the two dashes) and one of background, surface, text, border, primary, secondary, tertiary, neutral, success, warning, error, contrast, optionally followed by a strength from 1% to 100%. |
 
 | Tag | Attributes | What it does on screen |
 |---|---|---|

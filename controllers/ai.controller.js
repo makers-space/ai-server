@@ -1654,6 +1654,22 @@ const openSkillTool = (listed) => {
     };
 };
 // The files of the skills a chat has on are read one at a time, when the skill's instructions send the model to one.
+// What the person is told a model is doing while it writes a call to a tool and while that tool runs.
+const DOING = {
+    web_search: 'Searching the web…',
+    web_fetch: 'Reading a web page…',
+    read_web_page: 'Reading a web page…',
+    open_skill: 'Opening a skill…',
+    open_skill_file: "Reading one of a skill's files…",
+    open_component: 'Reading how to draw a component…',
+    find_skill: 'Looking in the skill library…',
+    calculator: 'Working out a sum…',
+    date_time: 'Checking the date and time…'
+};
+const doingOf = (name, tools = []) => {
+    const tool = tools.find((one) => one.fn === name);
+    return tool?.doing || DOING[name] || `Using ${tool?.label || name}…`;
+};
 const SKILL_FILE_STEP = 'Skill file';
 const SKILL_FILE_ROOM = 12000;
 const skillFileTool = (withFiles) => {
@@ -1693,6 +1709,7 @@ const SKILL_FUNCTIONS = {
     'hairline-hairline-create': [{
         name: 'hairline_build',
         label: 'Hairline build',
+        doing: 'Building the figure…',
         description: 'Does what `node build.mjs <name>.js` does in the Hairline skill, without Node: puts your figure on the bench (bench.html with kernel.js and the figure in their two slots, nothing else changed) and shows the finished page to the user in the chat. Give the whole figure file. Use this instead of asking the user to run anything. There is no browser for you to look with here, so look.mjs cannot be run: say plainly that the look was not done.',
         parameters: { type: 'object', properties: { code: { type: 'string', description: 'The whole figure file as you would save it in <name>.js, ending with its hairline({ ... }) call' } }, required: ['code'] },
         run: (input, { show }) => {
@@ -1701,7 +1718,7 @@ const SKILL_FUNCTIONS = {
             if (!call) return { content: 'Nothing was built. A figure file ends with hairline({ name, means, rules, range, tour, mount }).', failed: 'failed' };
             if (code.includes('```')) return { content: 'Nothing was built. The figure must not contain three backticks in a row.', failed: 'failed' };
             const name = /\bname:\s*["'`]([a-z][a-z0-9-]*)["'`]/.exec(code.slice(call.index))?.[1] || 'figure';
-            show(['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n'));
+            show(['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}" palette="ground:background, ink:text, muted:text 65%, line:border, hairline-plate:background, hairline-hi:text, hairline-edge:text 55%, hairline-mid:text 32%, hairline-lo:border">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n'));
             return { content: `Built hairline-${name}.html and showed it to the user in the chat. You cannot see the page from here.` };
         }
     }]
@@ -1709,6 +1726,7 @@ const SKILL_FUNCTIONS = {
 const skillFunctionsFor = (chat) => skillsOf(chat).flatMap((skill) => (SKILL_FUNCTIONS[skill.id] || []).map((entry) => ({
     fn: entry.name,
     label: entry.label,
+    doing: entry.doing,
     changes: false,
     shown: () => skill.name,
     definition: { type: 'function', function: { name: entry.name, description: entry.description, parameters: entry.parameters } },
@@ -2309,6 +2327,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 for await (const part of stream) {
                     // Nothing that arrives after Stop is kept or shown, even if the service had already sent it.
                     if (gone) break;
+                    if (part.message?.tool_start) write({ type: 'note', text: doingOf(String(part.message.tool_start), chatTools) });
                     if (part.message?.thinking) {
                         reply.thinking += part.message.thinking;
                         write({ type: 'thinking', text: part.message.thinking });
@@ -2351,6 +2370,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     const input = mine?.shown ? mine.shown(given) : mine ? clip(JSON.stringify(given), 500) : toolInput(name, call.function?.arguments);
                     const step = { tool: mine ? mine.label : name, input, failed: null };
                     reply.steps.push(step);
+                    write({ type: 'note', text: doingOf(mine ? mine.fn : name, chatTools) });
                     write({ type: 'tool', tool: step.tool, input });
                     // Stop does not wait for a tool that is still running: a search, a page being read, a question to the person.
                     const outcome = await Promise.race([
@@ -2364,6 +2384,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     messages.push({ role: 'tool', tool_name: name, content: outcome.content });
                     if (gone) break;
                 }
+                // The tools are done; the model is thinking again.
+                write({ type: 'note', text: '' });
                 if (said && !/\s$/.test(reply.content)) {
                     reply.content += '\n\n';
                     write({ type: 'token', text: '\n\n' });

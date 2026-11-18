@@ -1744,6 +1744,7 @@ async function* sharedParts(response, started) {
             if (content) yield { message: { content } };
             for (const call of delta.tool_calls || []) {
                 const kept = calls.get(call.index ?? 0) || { name: '', text: '' };
+                if (!kept.name && call.function?.name) yield { message: { tool_start: call.function.name } };
                 calls.set(call.index ?? 0, { name: kept.name || call.function?.name || '', text: kept.text + (call.function?.arguments || '') });
             }
         }
@@ -1816,6 +1817,9 @@ const claudeRequest = (request, known) => {
 async function* claudeParts(stream, started) {
     try {
         for await (const event of stream) {
+            // The moment the model starts writing a call to a tool is passed on, so the person sees what it has turned to
+            // while a long call, such as a whole figure, is still being written.
+            if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') yield { message: { tool_start: event.content_block.name } };
             if (event.type !== 'content_block_delta') continue;
             if (event.delta.type === 'thinking_delta' && event.delta.thinking) yield { message: { thinking: event.delta.thinking } };
             if (event.delta.type === 'text_delta' && event.delta.text) yield { message: { content: event.delta.text } };
