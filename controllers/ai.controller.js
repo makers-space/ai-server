@@ -1501,7 +1501,8 @@ const capacityFor = (chat, facts) => {
 };
 
 // What the models are told lives in server/instructions: assistant.md is always sent, search.md is used by web search,
-// and each file in skills/ is a skill a chat can turn on or off.
+// each file in skills/ is a skill of Mollama's own, and library/ holds skills taken unchanged from other projects, one
+// folder per project. A chat turns skills on or off. Credits and licences are in THIRD_PARTY.md.
 const INSTRUCTIONS = path.join(import.meta.dirname, '..', 'instructions');
 const readGuide = (file) => {
     const text = fs.readFileSync(path.join(INSTRUCTIONS, file), 'utf8').replace(/\r\n/g, '\n');
@@ -1512,7 +1513,7 @@ const readGuide = (file) => {
 };
 const assistantGuide = readGuide('assistant.md');
 const searchGuide = readGuide('search.md');
-export const SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((file) => file.endsWith('.md')).map((file) => {
+const OWN_SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((file) => file.endsWith('.md')).map((file) => {
     const guide = readGuide(path.join('skills', file));
     return {
         id: file.slice(0, -3),
@@ -1521,11 +1522,53 @@ export const SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((
         default: guide.facts.default === 'true',
         order: Number(guide.facts.order) || 99,
         credit: guide.facts.credit || null,
+        source: 'mollama',
+        needs: [],
         text: guide.body,
         touch: guide.part('TOUCH'),
         remember: guide.part('REMEMBER')
     };
 }).sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
+
+// The projects the library's skills come from, in the order they are listed.
+export const SKILL_SOURCES = {
+    mollama: { name: 'Mollama', repo: null },
+    anthropic: { name: 'Anthropic', repo: 'anthropics/skills' },
+    engineering: { name: 'Engineering (Matt Pocock)', repo: 'mattpocock/skills' },
+    marketing: { name: 'Marketing (Corey Haines)', repo: 'coreyhaines31/marketingskills' },
+    medical: { name: 'Medical (Open Medica)', repo: 'Open-Medica/open-medical-skills' },
+    dex: { name: 'Chief of staff (Dex)', repo: 'davekilleen/dex' },
+    context7: { name: 'Context7', repo: 'upstash/context7' },
+    last30days: { name: 'Last 30 days', repo: 'mvanhorn/last30days-skill' },
+    anatomy: { name: 'Anatomy', repo: 'wheresryan22/anatomy' },
+    hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' }
+};
+// Library skills were written for agents that can run commands and open files. A chat here cannot, so the model is told.
+const AGENT_NOTE = 'This skill was written for an agent that can run commands and open files. In this chat you cannot: use its guidance, do every part you can in the conversation itself, and say plainly which steps need something you do not have. Never pretend to have run a command or read a file.';
+const LIBRARY = path.join(INSTRUCTIONS, 'library');
+const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
+    const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
+    const head = text.match(/^---\n([\s\S]*?)\n---\n/);
+    const facts = Object.fromEntries((head?.[1] || '').split('\n').map((line) => line.match(/^(\w+):\s*(.*)$/)).filter(Boolean).map((match) => [match[1], match[2].trim()]));
+    const needs = (facts.needs || '').split(',').filter(Boolean);
+    const name = facts.name || file.slice(0, -3);
+    return {
+        id: file.slice(0, -3),
+        name,
+        description: facts.description || '',
+        default: false,
+        order: 100,
+        credit: `${SKILL_SOURCES[source].repo} (${facts.licence})`,
+        source,
+        needs,
+        text: [`SKILL: ${name}`, needs.length > 0 && AGENT_NOTE, text.slice(head?.[0].length || 0).trim()].filter(Boolean).join('\n\n'),
+        touch: '',
+        remember: ''
+    };
+}));
+export const SKILLS = [...OWN_SKILLS, ...LIBRARY_SKILLS];
+// A skill is one to eight thousand tokens of instructions, so a chat holds only a few at once.
+export const MAX_CHAT_SKILLS = 8;
 const skillsOf = (chat) => SKILLS.filter((skill) => (Array.isArray(chat.skills) ? chat.skills.includes(skill.id) : skill.default));
 const closingOf = (chat) => ['REMEMBER', assistantGuide.part('REMEMBER'), ...skillsOf(chat).map((skill) => skill.remember)].filter(Boolean).join('\n');
 // Extra guidance for one reply goes in before the closing reminder, which stays the last thing the model reads.
@@ -1549,7 +1592,9 @@ export const listSkills = asyncHandler(async (req, res) => {
     res.status(200).json({
         success: true,
         webSearch: webSearchReady(),
-        skills: SKILLS.map(({ id, name, description, default: on, credit }) => ({ id, name, description, default: on, credit })),
+        skills: SKILLS.map(({ id, name, description, default: on, credit, source, needs, text }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text) })),
+        sources: Object.entries(SKILL_SOURCES).map(([id, source]) => ({ id, name: source.name, repo: source.repo, count: SKILLS.filter((skill) => skill.source === id).length })).filter((source) => source.count > 0),
+        maxSkills: MAX_CHAT_SKILLS,
         tools: [
             ...BUILTIN_TOOLS.map(({ id, name, description }) => ({ id, name, description, kind: 'builtin', ready: true, count: 1 })),
             ...servers.map((server) => ({ id: server.id, name: server.name, description: null, kind: server.kind, ready: server.health === 'healthy', state: TOOL_HEALTH[server.health].label, count: server.tools.length }))
@@ -1714,7 +1759,7 @@ const applyChatFields = (chat, body) => {
     for (const key of ['title', 'model', 'system', 'options', 'webSearch']) {
         if (key in body) chat[key] = body[key];
     }
-    if ('skills' in body) chat.skills = body.skills ? SKILLS.filter((skill) => body.skills.includes(skill.id)).map((skill) => skill.id) : undefined;
+    if ('skills' in body) chat.skills = body.skills ? SKILLS.filter((skill) => body.skills.includes(skill.id)).map((skill) => skill.id).slice(0, MAX_CHAT_SKILLS) : undefined;
     if ('tools' in body) {
         chat.tools = body.tools?.length ? [...new Set(body.tools)] : undefined;
         chat.allowedTools = undefined;
