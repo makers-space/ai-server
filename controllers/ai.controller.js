@@ -1687,7 +1687,7 @@ export const COMPONENT_PAGES = fs.readdirSync(path.join(INSTRUCTIONS, 'component
 }));
 const COMPONENT_STEP = 'Component';
 // Room kept for the pages of the few components one reply draws.
-const COMPONENT_ROOM = 3000;
+const COMPONENT_ROOM = 5000;
 const namesIn = (text) => String(text ?? '').split(/[\s,]+/).filter(Boolean);
 const drawsComponents = (chat) => skillsOf(chat).some((skill) => skill.id === 'components');
 const openComponentTool = () => {

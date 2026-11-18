@@ -1,42 +1,41 @@
 COMPONENT: Card
 
-A box drawn as a rounded panel with a thin border. Like a Container it arranges the components inside it, and it is also visible itself.
+A panel: filled with the panel colour, with a thin border and rounded corners. Like a Container it arranges the components inside it.
 
-Written as `<Card> ... </Card>` with other components between the tags.
+Written as `<Card> ... </Card>`.
 
 | Attribute | Values | What it does on screen |
 |---|---|---|
-| bordered | true, false | true draws the thin border around the panel (the default). false removes it, leaving only the fill. |
-| borderColor | primary, secondary, tertiary | The colour of the border. |
-| borderStrength | normal, soft | normal is a clear line. soft is a fainter one. |
-| radius | sm, md, lg, xl | How rounded the corners are, from slightly to very. |
-| shadow | true, false | true adds a soft shadow under the panel so it looks raised. The default is false. |
-| hover | true, false | true makes the panel lift slightly while the mouse is over it. The default is false. |
-| layout | block, flex, flex-column, grid | How the components inside are arranged. block: one under another, each as wide as the box (the default). flex: side by side in one row. flex-column: stacked top to bottom. grid: equal-width columns, as many as `columns` says. |
-| columns | a number from 1 to 6 | The number of equal columns when layout is grid. With 3, the fourth component starts a second row. |
-| gap | none, xs, sm, md, lg, xl, from no space to the widest | The space between the components inside. none makes them touch. The default is sm. |
-| padding | none, xs, sm, md, lg, xl, from no space to the widest | The space between the edge of the box and what is inside it. The default is md. |
-| justify | start, center, end, between, around, evenly | Where the contents sit along the layout direction (across a flex row, down a flex-column). start, center and end push them together at that place. between puts the first at one edge and the last at the other with equal space between. around puts equal space on both sides of each. evenly makes every space equal, the edges included. |
-| align | start, center, end, stretch, baseline | Where the contents sit across the layout direction (up and down in a flex row). stretch makes each one fill the box in that direction. baseline lines up their text. |
-| wrap | true, false | Whether a flex row may continue on a new line when it runs out of width. false keeps everything on one line. |
-| flexFill | no value | Makes this box take the space left over when it sits inside a flex box, so its neighbours keep only the width they need. |
-| width, height | a CSS length such as 100% or 240px | The size of the box. |
-| minWidth, minHeight, maxWidth | a CSS length such as 100% or 240px | The smallest or largest the box may become. |
-| backgroundColor | surface, background, primary, secondary, tertiary | Fills the box with a colour of the theme. surface is the colour of panels, background the colour of the page, the other three the theme's own colours. |
-| background | grid, graph, dots, lines, diagonal, crosshatch, checker, hex, plus, waves, zigzag, rings, aurora, gradient | Draws a faint pattern behind the contents. grid: square grid lines. graph: graph paper, a fine grid with a heavier line every fifth cell. dots: a grid of dots. lines: horizontal ruled lines. diagonal: diagonal stripes. crosshatch: diagonal stripes both ways. checker: a checkerboard. hex: a honeycomb. plus: small plus signs. waves: wavy lines. zigzag: zigzag lines. rings: rings spreading from the centre. aurora: soft blobs of colour that drift slowly. gradient: a wash of colour that moves slowly across. |
-| backgroundIntensity | subtle, medium, strong | How visible the pattern is, from barely there to clearly drawn. |
-| backgroundSize | sm, md, lg | The size of the pattern's cells. |
-| backgroundMotion | drift, pulse | Animates the pattern. drift slides it slowly. pulse fades it in and out. |
-| backgroundTone | primary, secondary, tertiary, neutral | The colour the pattern is drawn in. neutral is grey. |
-| backgroundFade | radial, top, bottom, left, right, center | Where the pattern fades away. radial: strongest in the middle, gone at the edges. top, bottom, left, right: it fades out toward that side. center: it shows at the left and right edges and is clear in the middle. |
+| bordered | true, false | true (default) draws the thin border. false removes it. |
+| borderColor | primary, secondary, tertiary | Colour of the border. |
+| borderStrength | normal, soft | soft makes the border fainter. |
+| radius | sm, md, lg, xl | Corner rounding: 8px, 14px, 20px or 28px. Without it the theme decides. |
+| shadow | true, false | true adds a soft shadow under the panel. Default false. |
+| hover | true, false | With shadow="true", the shadow deepens while the mouse is over the panel. On its own it shows nothing. |
+| layout | block, flex, flex-column, grid | How the components inside are arranged. **block** (the default): each Card, Container, Button, Divider, ProgressBar, Input, Select and Switch takes a full line, while Typography, Badge, Icon and CircularProgress flow side by side like words. **flex**: side by side in a row that wraps. **flex-column**: stacked top to bottom. **grid**: equal-width columns. |
+| columns | 1 to 6, or auto, auto-sm, auto-lg | For grid. A number gives that many equal columns. auto fits as many columns of at least 250px as there is room for (auto-sm 200px, auto-lg 300px). In a Container, numbered columns reduce on narrow windows: one column at 640px wide or less, at most two up to 900px, at most three up to 1200px. In a Card they never reduce. |
+| gap | none 0, xs 4px, sm 8px, md 12px, lg 16px, xl 24px | Space between the components inside. It only has an effect in flex, flex-column and grid, not in block. Default sm. |
+| padding | none 0, xs 4px, sm 8px, md 12px, lg 16px, xl 24px | Space between the edge of the box and what is inside. Default md (12px). |
+| justify | start, center, end, between, around, evenly | Position along the layout direction (across a flex row, down a flex-column). between: first at one edge, last at the other, equal space between. around: equal space on both sides of each. evenly: all spaces equal, edges included. In block layout only start, center and end work. |
+| align | start, center, end, stretch, baseline | Position across the layout direction. Default start, so things in a row line up at the top and keep their own heights; stretch makes them equal height; baseline lines up their text. No effect in block. |
+| wrap | true, false | For flex. true (default) lets a row continue on a new line; false keeps one line. |
+| flexFill | no value | Inside a flex box, this box takes all the space left over. |
+| width, height, minWidth, minHeight, maxWidth | a CSS length with its unit, such as 100% or 240px | Size of the box. A box written at the top of a block is only as wide as its content unless given width="100%". |
+| backgroundColor | surface, background, primary, secondary, tertiary, neutral | Fills the box. surface is the panel colour, background the page colour. The text inside does not change colour, so on a primary, secondary or tertiary fill give Typography color="contrast". |
+| background | grid, graph, dots, lines, diagonal, crosshatch, checker, hex, plus, waves, zigzag, rings, aurora, gradient | A faint pattern behind the contents. grid: thin lines both ways. graph: a finer grid with a stronger line every fifth cell. dots: one dot per cell. lines: horizontal rules. diagonal: thin 45° lines. crosshatch: both diagonals. checker: checkerboard. hex: honeycomb. plus: a small plus in each cell. waves and zigzag: wavy or zigzag lines. rings: rings spreading from the centre. aurora: six soft blobs of the theme's colours drifting slowly. gradient: one band of colour sweeping across. |
+| backgroundIntensity | subtle, medium, strong | How visible the pattern is: 12%, 22% or 40% of its colour. Default subtle. |
+| backgroundSize | sm, md, lg | Cell size of the pattern: 16px, 24px or 40px. Default md. No effect on aurora or gradient. |
+| backgroundTone | auto, primary, secondary, tertiary, neutral, text, contrast | Colour of the pattern. auto (default) picks one that shows on the fill. |
+| backgroundMotion | none, drift, pulse | drift slides the pattern one cell every 8 seconds (rings ripple outward). pulse fades it in and out every 5 seconds. aurora and gradient always move unless this is none. |
+| backgroundFade | none, radial, radial-inverse, top, bottom, left, right, center | Where the pattern fades away. radial: strong in the middle, gone at the edges. radial-inverse: clear in the middle, stronger at the edges. top, bottom, left, right: it fades out toward that side. center: shows at the left and right edges, clear in the middle. |
 
 ```component
-<Card layout="flex-column" gap="sm" padding="md">
-  <Container layout="flex" justify="between" align="center">
+<Card layout="flex-column" gap="sm" width="100%">
+  <Container layout="flex" justify="between" align="center" width="100%">
     <Typography weight="bold">Server status</Typography>
     <Badge color="success">Online</Badge>
   </Container>
   <ProgressBar value="72" label="Disk used" showPercentage />
 </Card>
 ```
-That draws a rounded panel: a bold title on the left with a green pill on the right, and a bar filled to 72% under them.
+A panel with a bold title and a badge on one line, and a labelled bar filled to 72% under them.

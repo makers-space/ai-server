@@ -1,28 +1,31 @@
 COMPONENT: Data
 
-A table of records.
+A table of records with its own controls: a search box, filters, a list of columns to show or hide, a switch between table, cards and list, sorting, and pages of 10 rows.
 
-Written as `<Data> ... </Data>` with one Row tag for each record, or as `<Data src="https://..." />` to show a file.
+Written as `<Data> ... </Data>` with one Row for each record, or as `<Data src="https://..." />` to show a CSV or JSON file.
 
 | Attribute | Values | What it does on screen |
 |---|---|---|
-| variant | table, cards, list | How the records are laid out. table: rows and columns with a header (the default). cards: one small panel for each record. list: one line for each record. |
-| src | the https address of a CSV file or a JSON list | Loads the records from that file instead of from Row tags. |
+| variant | table, cards, list | The view it opens in; the user can switch. **table** (default): rows and columns with a shaded header. **cards**: one small panel for each record with "Field: value" lines, as many per row as fit. **list**: one full-width panel for each record, its fields side by side. |
+| src | the https address of a CSV or JSON file | Shows that file instead of Rows. CSV: commas, first line is the header. JSON: a list of objects, or an object holding one. Only the first 500 rows are kept. |
 
-Tags that go inside Data:
+Tags inside Data:
 
 | Tag | Attributes | What it does on screen |
 |---|---|---|
-| `<Row />` | any names you choose, such as task="Design" status="Open" | One record. Every attribute is one column, and its value is what that cell shows. Use the same names on every Row. |
-| `<Column />` | key, label, as, colors | Optional, written before the Rows. Changes how one column is shown. key: the Row attribute it applies to. label: the text in the column's header. as: Badge shows each value in a pill, ProgressBar shows a number from 0 to 100 as a bar with its percentage, Typography shows plain text. colors: for Badge, which value gets which colour, written as pairs such as "Open:success, Late:error". |
+| `<Row />` | any names, such as task="Design" dueDate="Friday" | One record; each attribute is a column. Names have no spaces. **The column heading comes from the name**: its first letter is capitalised and a space goes before each later capital, so dueDate reads "Due Date" and task reads "Task". Columns appear in the order of the first Row. A value that is a number is shown as a number (1,200 becomes 1200). An address is shown as plain text, not a link. Missing values are left blank. |
+| `<Column />` | key, as, colors, label | Optional. Changes how one column is drawn. **key**: the Row attribute it applies to. **as="Badge"**: each value in a small filled label. **as="ProgressBar"**: a number from 0 to 100 as a bar, coloured by how full it is, with no number beside it. **as="Typography"**: plain text that can be coloured. **colors**: which value gets which colour, as pairs such as "Open:success, Late:error"; the value must match exactly, capitals included. **label**: a name for the column in the show-or-hide list only; it does not change the heading. |
+
+What the user can do: type in "Search all columns…"; open Filters for one control per column (a date range, a dropdown when there are 10 or fewer different values, otherwise a text box); show or hide columns; switch view; sort by any column from a dropdown under the table; choose 5, 10, 20, 50 or 100 rows per page. Only 10 rows show at first, so the rest are on later pages. A wide table scrolls sideways; long text is not cut.
 
 ```component
 <Data>
-  <Column key="task" label="Task" />
-  <Column key="status" label="Status" as="Badge" colors="Open:success, Late:error" />
-  <Column key="done" label="Progress" as="ProgressBar" />
+  <Column key="status" as="Badge" colors="Open:success, Late:error" />
+  <Column key="done" as="ProgressBar" />
   <Row task="Design" status="Open" done="40" />
   <Row task="Build" status="Late" done="10" />
 </Data>
 ```
-That draws a table with three columns: the task as text, the status as a green or red pill, and the progress as a bar.
+A table headed Task, Status and Done: the status as a green or red label, done as a bar.
+
+With no Row and no src nothing is drawn. If a file cannot be read as a table the user sees "This file does not hold a table that can be shown. Use a CSV file or a JSON list."
