@@ -2973,7 +2973,7 @@ const checkProvider = async (provider) => {
         const client = createCloudClient(entry, unseal(provider.sealed)?.key);
         await client.prove();
         const { models } = await client.list();
-        provider.models = models.slice(0, 500).map((model) => ({ name: model.name, contextLength: model.cloud?.contextLength || null, vision: Boolean(model.cloud?.vision) }));
+        provider.models = models.slice(0, 500).map((model) => ({ name: model.name, contextLength: model.cloud?.contextLength || null, vision: Boolean(model.cloud?.vision), maxOutput: model.cloud?.maxOutput || null }));
         provider.health = provider.models.length > 0 ? 'healthy' : 'empty';
     } catch (error) {
         provider.health = PROVIDER_FAULTS[mapOllamaError(error).code] || 'unreachable';

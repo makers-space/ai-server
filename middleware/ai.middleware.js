@@ -9,6 +9,7 @@ import net from 'node:net';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import { Ollama } from 'ollama';
+import Anthropic from '@anthropic-ai/sdk';
 import { Client, StreamableHTTPClientTransport, SSEClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 
 const ERROR_TABLE = {
@@ -1551,7 +1552,7 @@ const keySteps = (maker, where) => [`Open the key page and sign up or sign in to
 const online = (id, name, base, does, page, cost, where, extra = {}) => ({ id, name, base, does, type: 'openai', key: { page, cost, steps: keySteps(name, where) }, ...extra });
 export const CLOUD_PROVIDERS = [
     online('ollama', 'Ollama', 'https://ollama.com', 'The large open models in Ollama\'s library, such as Kimi, GLM and DeepSeek, run on Ollama\'s computers', 'https://ollama.com/settings/keys', 'Pay for what you use, at Ollama\'s prices. There is no free allowance.', 'Under Keys, add an API key.', { type: 'ollama', proof: { path: '/api/me', method: 'POST' } }),
-    online('anthropic', 'Anthropic', 'https://api.anthropic.com/v1', 'The Claude models', 'https://platform.claude.com/settings/keys', 'Paid by use. Separate from a Claude subscription.', 'Under API keys, create a key.', { bare: true }),
+    online('anthropic', 'Anthropic', 'https://api.anthropic.com', 'The Claude models', 'https://platform.claude.com/settings/keys', 'Paid by use. Separate from a Claude subscription.', 'Under API keys, create a key.', { type: 'anthropic' }),
     online('openai', 'OpenAI', 'https://api.openai.com/v1', 'The GPT models', 'https://platform.openai.com/api-keys', 'Paid by use. Separate from a ChatGPT subscription.', 'Under API keys, create a new secret key.'),
     online('google', 'Google', 'https://generativelanguage.googleapis.com/v1beta/openai', 'The Gemini models', 'https://aistudio.google.com/apikey', 'Has a free allowance; paid beyond it.', 'Choose Create API key.'),
     online('moonshot', 'Moonshot', 'https://api.moonshot.ai/v1', 'The Kimi models', 'https://platform.kimi.ai/console/api-keys', 'Paid by use.', 'Under API keys, create a key. Use the international site; keys from the China site do not work here.'),
@@ -1676,6 +1677,76 @@ async function* sharedParts(response, started) {
     yield { done: true, eval_count: usage?.completion_tokens || 0, prompt_eval_count: usage?.prompt_tokens || 0, total_duration: (Date.now() - started) * 1e6 };
 }
 
+// Claude is reached through Anthropic's own library and its own request shape, not the shared one.
+const claudeFault = (error) => {
+    if (error instanceof OllamaError) return error;
+    if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) return new OllamaError('KEY_REFUSED', error.message);
+    if (error instanceof Anthropic.RateLimitError) return new OllamaError(/credit|billing|spend/i.test(error.message) ? 'OUT_OF_CREDIT' : 'PROVIDER_BUSY', error.message);
+    if (error instanceof Anthropic.NotFoundError) return new OllamaError('MODEL_NOT_FOUND', error.message);
+    if (error instanceof Anthropic.APIConnectionError) return new OllamaError('PROVIDER_DOWN', error.message);
+    if (error instanceof Anthropic.APIError) return new OllamaError(cloudFault(Number(error.status) || 500, String(error.message || '')), String(error.message || '').slice(0, 300));
+    return new OllamaError('PROVIDER_DOWN', String(error?.message || ''));
+};
+const toClaudeShape = (messages) => {
+    const system = messages.filter((message) => message.role === 'system').map((message) => String(message.content ?? '')).join('\n\n');
+    const waiting = [];
+    let count = 0;
+    const turns = [];
+    for (const message of messages) {
+        if (message.role === 'system') continue;
+        let role = message.role === 'assistant' ? 'assistant' : 'user';
+        let content;
+        if (message.role === 'tool') {
+            content = [{ type: 'tool_result', tool_use_id: waiting.shift() || `toolu_${++count}`, content: String(message.content ?? '') }];
+        } else if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+            content = [...(message.content ? [{ type: 'text', text: String(message.content) }] : []), ...message.tool_calls.map((call) => {
+                const id = `toolu_${++count}`;
+                waiting.push(id);
+                return { type: 'tool_use', id, name: call.function?.name, input: call.function?.arguments || {} };
+            })];
+        } else if (role === 'user' && Array.isArray(message.images) && message.images.length > 0) {
+            content = [...message.images.map((image) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } })), { type: 'text', text: String(message.content ?? '') }];
+        } else {
+            content = String(message.content ?? '') || '…';
+        }
+        const last = turns.at(-1);
+        // Tool results that answer one reply go back together, in one turn.
+        if (last && last.role === role && Array.isArray(last.content) && Array.isArray(content) && content[0]?.type === 'tool_result') last.content.push(...content);
+        else turns.push({ role, content });
+    }
+    return { system, turns };
+};
+const claudeClient = (key) => new Anthropic({ apiKey: key, fetch: cloudFetch, maxRetries: 1 });
+const claudeRequest = (request, known) => {
+    const { system, turns } = toClaudeShape(request.messages);
+    const cap = known.find((model) => model.name === request.model)?.maxOutput || 8192;
+    return {
+        model: request.model,
+        max_tokens: Math.min(cap, request.stream ? 64000 : 16000),
+        messages: turns,
+        ...(system ? { system } : {}),
+        ...(request.tools ? { tools: request.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters })) } : {})
+    };
+};
+async function* claudeParts(stream, started) {
+    try {
+        for await (const event of stream) {
+            if (event.type !== 'content_block_delta') continue;
+            if (event.delta.type === 'thinking_delta' && event.delta.thinking) yield { message: { thinking: event.delta.thinking } };
+            if (event.delta.type === 'text_delta' && event.delta.text) yield { message: { content: event.delta.text } };
+        }
+        const final = await stream.finalMessage();
+        if (final.stop_reason === 'refusal') yield { message: { content: 'This model declined to answer that request.' } };
+        const calls = final.content.filter((block) => block.type === 'tool_use');
+        if (calls.length > 0) yield { message: { tool_calls: calls.map((block) => ({ function: { name: block.name, arguments: block.input || {} } })) } };
+        const usage = final.usage || {};
+        yield { done: true, eval_count: usage.output_tokens || 0, prompt_eval_count: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), total_duration: (Date.now() - started) * 1e6 };
+    } catch (error) {
+        if (error?.name === 'AbortError' || error instanceof Anthropic.APIUserAbortError) throw error;
+        throw claudeFault(error);
+    }
+}
+
 // Stands where the Ollama client stands, so the chat loop runs an online model without knowing the difference.
 // "known" is the list of models read at the last check, used for what each model can take.
 export const createCloudClient = (entry, key, known = []) => {
@@ -1707,6 +1778,43 @@ export const createCloudClient = (entry, key, known = []) => {
             if (response.status === 401 || response.status === 403) throw new OllamaError('KEY_REFUSED');
         }
     };
+
+    if (entry.type === 'anthropic') {
+        return {
+            ...common,
+            list: async () => {
+                const models = [];
+                try {
+                    for await (const model of claudeClient(key).models.list({ limit: 1000 })) models.push(model);
+                } catch (error) {
+                    throw claudeFault(error);
+                }
+                return {
+                    models: models.map((model) => ({
+                        name: model.id,
+                        size: 0,
+                        details: {},
+                        cloud: { contextLength: model.max_input_tokens || null, maxOutput: model.max_tokens || null, vision: Boolean(model.capabilities?.image_input?.supported ?? model.capabilities?.image_input) }
+                    }))
+                };
+            },
+            chat: async (request) => {
+                const started = Date.now();
+                if (!request.stream) {
+                    try {
+                        const answer = await claudeClient(key).messages.create(claudeRequest(request, known));
+                        return { message: { content: answer.content.filter((block) => block.type === 'text').map((block) => block.text).join('') }, eval_count: answer.usage?.output_tokens || 0, prompt_eval_count: answer.usage?.input_tokens || 0 };
+                    } catch (error) {
+                        throw claudeFault(error);
+                    }
+                }
+                const stream = claudeClient(key).messages.stream(claudeRequest(request, known));
+                const parts = claudeParts(stream, started);
+                parts.abort = () => stream.abort();
+                return parts;
+            }
+        };
+    }
 
     if (entry.type === 'ollama') {
         const raw = () => new Ollama({ host: entry.base, fetch: cloudFetch, headers: { Authorization: `Bearer ${key}` } });
