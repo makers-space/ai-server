@@ -1516,7 +1516,16 @@ const TOUCH_EVERY = 4;
 export const REVIEW_GUIDE = searchGuide.part('SEARCH REVIEW');
 
 export const listSkills = asyncHandler(async (req, res) => {
-    res.status(200).json({ success: true, webSearch: webSearchReady(), skills: SKILLS.map(({ id, name, description, default: on, credit }) => ({ id, name, description, default: on, credit })) });
+    const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
+    res.status(200).json({
+        success: true,
+        webSearch: webSearchReady(),
+        skills: SKILLS.map(({ id, name, description, default: on, credit }) => ({ id, name, description, default: on, credit })),
+        tools: [
+            ...BUILTIN_TOOLS.map(({ id, name, description }) => ({ id, name, description, kind: 'builtin', ready: true, count: 1 })),
+            ...servers.map((server) => ({ id: server.id, name: server.name, description: null, kind: server.kind, ready: server.health === 'healthy', state: TOOL_HEALTH[server.health].label, count: server.tools.length }))
+        ]
+    });
 });
 
 const MAX_PROMPTS = 100;
@@ -1614,6 +1623,7 @@ const presentChat = (chat, facts = null) => ({
     systemSource: chat.systemSource,
     instructions: instructionsOf(chat),
     skills: skillsOf(chat).map((skill) => skill.id),
+    tools: chat.tools || [],
     webSearch: chat.webSearch !== false,
     summary: chat.summary,
     continuedFrom: chat.continuedFrom,
@@ -1672,6 +1682,10 @@ const applyChatFields = (chat, body) => {
         if (key in body) chat[key] = body[key];
     }
     if ('skills' in body) chat.skills = body.skills ? SKILLS.filter((skill) => body.skills.includes(skill.id)).map((skill) => skill.id) : undefined;
+    if ('tools' in body) {
+        chat.tools = body.tools?.length ? [...new Set(body.tools)] : undefined;
+        chat.allowedTools = undefined;
+    }
     if ('system' in body) chat.instructions = [];
     if ('instructions' in body) {
         chat.instructions = body.instructions.map(cleanInstruction);
@@ -2175,6 +2189,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const searching = searchOn && !appSearch && facts.capabilities.includes('tools');
         const messages = [...prompt];
         if (searching) messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, SEARCH_GUIDE) };
+        const chatTools = facts.capabilities.includes('tools') ? await toolsForChat(chat, userId) : [];
+        if (chatTools.length > 0) messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, TOOLS_GUIDE) };
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -2223,7 +2239,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     keep_alive: `${settings.keepAliveMinutes}m`
                 };
                 if (facts.capabilities.includes('thinking')) request.think = true;
-                if (searching && round < MAX_TOOL_ROUNDS) request.tools = SEARCH_TOOLS;
+                if ((searching || chatTools.length > 0) && round < MAX_TOOL_ROUNDS) request.tools = [...(searching ? SEARCH_TOOLS : []), ...chatTools.map((tool) => tool.definition)];
 
                 const calls = [];
                 let said = '';
@@ -2262,11 +2278,14 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 messages.push({ role: 'assistant', content: said, tool_calls: calls });
                 for (const call of calls) {
                     const name = String(call.function?.name || '');
-                    const input = toolInput(name, call.function?.arguments);
-                    const step = { tool: name, input, failed: null };
+                    const mine = chatTools.find((tool) => tool.fn === name);
+                    const input = mine ? clip(JSON.stringify(toolArguments(call.function?.arguments)), 500) : toolInput(name, call.function?.arguments);
+                    const step = { tool: mine ? mine.label : name, input, failed: null };
                     reply.steps.push(step);
-                    write({ type: 'tool', tool: name, input });
-                    const outcome = await runSearchTool(name, input);
+                    write({ type: 'tool', tool: step.tool, input });
+                    const outcome = mine
+                        ? await runChatTool(mine, toolArguments(call.function?.arguments), { chat, userId, write, stopped: () => gone })
+                        : await runSearchTool(name, input);
                     if (outcome.failed) {
                         step.failed = outcome.failed;
                         write({ type: 'toolFailed', failed: outcome.failed });
@@ -3036,3 +3055,168 @@ export const removeProvider = asyncHandler(async (req, res) => {
     await provider.deleteOne();
     res.status(200).json({ success: true, message: 'Online service removed.' });
 });
+
+// Tools a chat has switched on. Built-in ones are functions here; the rest come from the person's tool servers.
+export const TOOLS_GUIDE = fs.readFileSync(path.join(INSTRUCTIONS, 'tools.md'), 'utf8').trim();
+const MAX_CHAT_TOOLS = 40;
+const TOOL_RESULT_CHARS = 20000;
+const TOOL_CALLS_AN_HOUR = 120;
+const PERMISSION_WAIT_MS = 3 * 60 * 1000;
+
+const toolArguments = (raw) => {
+    if (raw && typeof raw === 'object') return raw;
+    try {
+        const parsed = JSON.parse(String(raw || '{}'));
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+};
+
+export const BUILTIN_TOOLS = [
+    {
+        id: 'date_time',
+        name: 'Date and time',
+        description: 'Get the current date and time, optionally in a named time zone.',
+        parameters: { type: 'object', properties: { timezone: { type: 'string', description: 'A time zone name such as Europe/London. Leave out for UTC.' } } },
+        run: async ({ timezone }) => {
+            const now = new Date();
+            try {
+                return new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'long', timeZone: timezone || 'UTC' }).format(now);
+            } catch {
+                return `${new Intl.DateTimeFormat('en-GB', { dateStyle: 'full', timeStyle: 'long', timeZone: 'UTC' }).format(now)} (the time zone "${clip(timezone, 60)}" is not one I know, so this is UTC)`;
+            }
+        }
+    },
+    {
+        id: 'calculator',
+        name: 'Calculator',
+        description: 'Work out an arithmetic expression exactly. Supports + - * / % ^ and brackets.',
+        parameters: { type: 'object', properties: { expression: { type: 'string', description: 'For example (12.5 * 4) / 3 ^ 2' } }, required: ['expression'] },
+        run: async ({ expression }) => {
+            const text = String(expression ?? '').trim();
+            if (!text || text.length > 300 || !/^[\d\s+\-*/().,%^]+$/.test(text)) return 'That is not an arithmetic expression. Use numbers with + - * / % ^ and brackets only.';
+            try {
+                const value = Function(`"use strict"; return (${text.replace(/\^/g, '**').replace(/,/g, '')});`)();
+                return Number.isFinite(value) ? String(value) : 'The result is not a finite number.';
+            } catch {
+                return 'That expression could not be worked out. Check the brackets and operators.';
+            }
+        }
+    },
+    {
+        id: 'read_web_page',
+        name: 'Read a web page',
+        description: 'Fetch a public web page by its full https address and return its title and text.',
+        parameters: { type: 'object', properties: { url: { type: 'string', description: 'The full address, starting with https://' } }, required: ['url'] },
+        run: async ({ url }) => {
+            if (!/^https:\/\//i.test(String(url || ''))) return 'This tool needs a full address that starts with https://';
+            const page = await readPage(String(url));
+            return JSON.stringify({ title: clip(page?.title, 200), content: clip(page?.content, 8000) });
+        }
+    }
+];
+
+const toolName = (taken, prefix, name) => {
+    const base = `${prefix}_${name}`.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
+    let unique = base;
+    for (let copy = 2; taken.has(unique); copy += 1) unique = `${base.slice(0, 56)}_${copy}`;
+    taken.add(unique);
+    return unique;
+};
+const textOfResult = (result) => {
+    const pieces = Array.isArray(result?.content) ? result.content : [];
+    const text = pieces.map((piece) => (piece.type === 'text' ? piece.text : piece.type === 'resource' ? piece.resource?.text || '' : `[${piece.type}]`)).join('\n').trim();
+    return text || (result?.structuredContent ? JSON.stringify(result.structuredContent) : 'The tool returned nothing.');
+};
+
+// Every tool the chat may use this turn, each with the name the model calls it by and the way to run it.
+const toolsForChat = async (chat, userId) => {
+    const chosen = chat.tools || [];
+    if (chosen.length === 0) return [];
+    const taken = new Set(['web_search', 'web_fetch']);
+    const tools = BUILTIN_TOOLS.filter((tool) => chosen.includes(tool.id)).map((tool) => {
+        taken.add(tool.id);
+        return { fn: tool.id, label: tool.name, changes: false, definition: { type: 'function', function: { name: tool.id, description: tool.description, parameters: tool.parameters } }, run: async (input) => ({ content: await tool.run(input), failed: null }) };
+    });
+    const ids = chosen.filter((id) => mongoose.isValidObjectId(id));
+    const servers = ids.length ? await ToolServer.find({ _id: { $in: ids }, service: SERVICE, owner: userId, health: 'healthy' }).select('+sealed').sort({ name: 1 }) : [];
+    for (const server of servers) {
+        for (const tool of server.tools) {
+            const fn = toolName(taken, server.name.toLowerCase(), tool.name);
+            tools.push({
+                fn,
+                label: `${server.name}: ${tool.title || tool.name}`,
+                changes: !tool.readOnly,
+                definition: { type: 'function', function: { name: fn, description: clip(tool.description, 600), parameters: tool.input || { type: 'object', properties: {} } } },
+                run: (input) => callServerTool(server, tool.name, input)
+            });
+        }
+    }
+    return tools.slice(0, MAX_CHAT_TOOLS);
+};
+
+const callServerTool = async (server, name, input) => {
+    if (server.kind === 'local') {
+        if (!deviceGateway.isOnline(server.device)) return { content: 'That computer is not connected, so the tool could not run. The Mollama desktop app has to be open on it.', failed: 'offline' };
+        const answer = await deviceGateway.tools(server.device, { action: 'call', localId: server.localId, name, arguments: input });
+        return { content: clip(answer?.content || 'The tool returned nothing.', TOOL_RESULT_CHARS), failed: answer?.isError ? 'failed' : null };
+    }
+    const kept = unseal(server.sealed) || {};
+    const keeper = kept.key ? null : accountKeeper(kept, kept.redirect);
+    const result = await withToolServer({ address: server.address, key: kept.key, keeper }, (client) => client.callTool({ name, arguments: input }, { timeout: 60000 }));
+    if (keeper) await ToolServer.updateOne({ _id: server._id }, { sealed: seal(kept) });
+    return { content: clip(textOfResult(result), TOOL_RESULT_CHARS), failed: result?.isError ? 'failed' : null };
+};
+
+const toolCalls = new Map();
+const underLimit = (userId) => {
+    const now = Date.now();
+    const kept = toolCalls.get(String(userId));
+    const window = kept && now - kept.since < 60 * 60 * 1000 ? kept : { since: now, count: 0 };
+    window.count += 1;
+    toolCalls.set(String(userId), window);
+    return window.count <= TOOL_CALLS_AN_HOUR;
+};
+
+// A tool that changes something waits here until the person allows or refuses it; no answer in time is a refusal.
+const permissions = new Map();
+const askPermission = (chat, tool, input, write) => new Promise((resolve) => {
+    const id = crypto.randomBytes(8).toString('hex');
+    const timer = setTimeout(() => settle('no'), PERMISSION_WAIT_MS);
+    timer.unref?.();
+    const settle = (answer) => {
+        clearTimeout(timer);
+        permissions.delete(id);
+        resolve(answer);
+    };
+    permissions.set(id, { chatId: chat.id, settle });
+    write({ type: 'permission', id, tool: tool.label, input: clip(JSON.stringify(input), 500) });
+});
+
+export const waitingPermissions = () => [...permissions.entries()].map(([id, waiting]) => ({ id, chatId: waiting.chatId }));
+
+export const answerPermission = asyncHandler(async (req, res) => {
+    const chat = await Chat.exists({ _id: req.params.id, service: SERVICE, owner: req.user.id });
+    const waiting = permissions.get(req.body.id);
+    if (!chat || !waiting || waiting.chatId !== req.params.id) return res.status(404).json({ success: false, message: 'That question is no longer waiting for an answer.' });
+    waiting.settle(req.body.answer);
+    res.status(200).json({ success: true });
+});
+
+const runChatTool = async (tool, input, { chat, userId, write, stopped }) => {
+    try {
+        if (!underLimit(userId)) return { content: 'The limit on tool use for this hour has been reached. Answer without tools and say so.', failed: 'limited' };
+        if (tool.changes && !(chat.allowedTools || []).includes(tool.fn)) {
+            const answer = await askPermission(chat, tool, input, write);
+            if (stopped()) return { content: 'The reply was stopped.', failed: 'refused' };
+            if (answer === 'no') return { content: 'The person did not allow this tool to run. Do not try another way to do the same thing; say that it was not done.', failed: 'refused' };
+            if (answer === 'always') chat.allowedTools = [...(chat.allowedTools || []), tool.fn];
+        }
+        return await tool.run(input);
+    } catch (error) {
+        const code = mapOllamaError(error).code;
+        logger.warn('[Chat] Tool failed', { tool: tool.fn, code });
+        return { content: `Error: ${clip(error?.message || 'the tool could not be run', 300)}`, failed: code === 'REMOTE_BLOCKED' ? 'blocked' : code === 'DEVICE_OFFLINE' ? 'offline' : 'unreachable' };
+    }
+};

@@ -380,7 +380,7 @@ export class DeviceGateway extends EventEmitter {
     }
 
     // Asks the desktop app about the tool servers on its computer. An app too old to know the question stays silent.
-    tools(deviceId, request, ms = this.askMs) {
+    tools(deviceId, request, ms = request?.action === 'call' ? 70000 : this.askMs) {
         return new Promise((resolve, reject) => {
             const entry = this.devices.get(String(deviceId));
             if (!entry) return reject(new OllamaError('DEVICE_OFFLINE'));

@@ -270,6 +270,8 @@ const chatSchema = new mongoose.Schema({
     systemSource: { type: String, default: null },
     instructions: { type: [instructionSchema], default: [] },
     skills: { type: [String], default: undefined },
+    tools: { type: [String], default: undefined },
+    allowedTools: { type: [String], default: undefined },
     webSearch: { type: Boolean, default: true },
     summary: { type: String, default: '' },
     continuedFrom: { type: mongoose.Schema.Types.ObjectId, default: null },
@@ -386,6 +388,7 @@ const chatFields = {
     systemSource: Joi.string().max(1000).allow(null, ''),
     instructions: Joi.array().max(10).items(Joi.object(instruction)),
     skills: Joi.array().max(30).items(Joi.string().pattern(/^[a-z0-9-]{1,60}$/)).allow(null),
+    tools: Joi.array().max(40).items(Joi.string().pattern(/^[a-z0-9_]{1,40}$/)).allow(null),
     webSearch: Joi.boolean(),
     options: generationOptions
 };
@@ -396,6 +399,7 @@ export const chatSchemas = {
     list: Joi.object({ search: Joi.string().trim().max(100).allow('') }),
     create: Joi.object(chatFields),
     update: Joi.object(chatFields).min(1),
+    permission: Joi.object({ id: Joi.string().pattern(/^[a-z0-9]{6,40}$/).required(), answer: Joi.string().valid('once', 'always', 'no').required() }),
     send: Joi.object({
         content: Joi.string().min(1).max(100000),
         regenerate: Joi.boolean(),
