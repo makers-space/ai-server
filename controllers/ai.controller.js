@@ -678,18 +678,20 @@ const effectiveHardware = (device) => {
     };
 };
 
+// Models that only make embeddings cannot hold a chat, so they are counted apart: a computer with only those is not ready to chat.
+const embedsOnly = (model) => /bert/i.test(model.details?.family || '') || /embed/i.test(model.name || '');
 const readOllama = async (client) => {
     const status = await client.status();
-    if (!status.available) return { ...status, modelCount: 0 };
+    if (!status.available) return { ...status, modelCount: 0, chatCount: 0 };
     try {
         const { models } = await client.list();
-        return { ...status, modelCount: models.length };
+        return { ...status, modelCount: models.length, chatCount: models.filter((model) => !embedsOnly(model)).length };
     } catch {
-        return { ...status, modelCount: 0 };
+        return { ...status, modelCount: 0, chatCount: 0 };
     }
 };
 
-const UNREACHED = { available: false, version: null, modelCount: 0 };
+const UNREACHED = { available: false, version: null, modelCount: 0, chatCount: 0 };
 const isOnline = (device) => device.kind === 'local' || deviceGateway.isOnline(device.id);
 const ollamaOf = (device) => (device.paused
     ? { ...UNREACHED, paused: true }
@@ -1582,11 +1584,15 @@ const touchAllowed = (chat) => {
     return recent.length === TOUCH_EVERY && recent.every((message) => !message.content.includes('```component'));
 };
 
+// Models do not know the date; without it they guess a year from their training. It changes once a day, so the
+// prompt a computer has already read stays good for the rest of that day.
+export const todayLine = () => `Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })} (UTC).`;
+
 const buildMessages = (chat) => {
     const out = [];
     const active = skillsOf(chat);
     const touch = active.some((skill) => skill.id === 'components') && touchAllowed(chat) && TOUCH_GUIDE;
-    const system = [BASE_GUIDE, ...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, closingOf(chat)].filter(Boolean).join('\n\n');
+    const system = [BASE_GUIDE, ...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, touch, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
@@ -1894,7 +1900,7 @@ const rawAddress = (address) => {
 };
 
 // The app runs the web search itself: the model only writes the queries, in a fixed JSON shape.
-export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write, steps, stopped, prefix = null, track = null }) => {
+export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write, steps, stopped, prefix = null, track = null, tools = [] }) => {
     const known = new Set();
     const usable = new Set();
     for (const message of chat.messages) {
@@ -1947,7 +1953,9 @@ export const gatherWeb = async ({ ollama, chat, facts, keepAlive, numCtx, write,
     const cleanSearches = (list) => (Array.isArray(list) ? list : [])
         .map((search) => ({ query: String(search?.query ?? '').trim().slice(0, 200), types: cleanTypes(search?.fileTypes) }))
         .filter((search) => search.query);
-    const plan = await ask(PLAN_FORMAT, PLAN_GUIDE, `THE USER'S MESSAGE\n${question}`);
+    // The planner is told the date and which tools the assistant holds, so it leaves to them what they answer exactly.
+    const has = tools.length > 0 ? `\n\nTOOLS THE ASSISTANT HAS\n${tools.map((tool) => `- ${tool.label}: ${tool.description}`).join('\n')}` : '';
+    const plan = await ask(PLAN_FORMAT, PLAN_GUIDE, `TODAY\n${todayLine()}${has}\n\nTHE USER'S MESSAGE\n${question}`);
     const searches = cleanSearches(plan.searches).slice(0, MAX_SEARCHES);
     const planNote = String(plan.note ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
     if (planNote) write({ type: 'note', text: planNote });
@@ -2226,7 +2234,6 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const searchCtx = sizeFor(messages, Math.ceil(MAX_RESULTS_CHARS / 4));
         let found = null;
         if (appSearch) {
-            messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, RESULTS_GUIDE) };
             try {
                 found = await Promise.race([stopSignal.then(() => null), gatherWeb({
                     ollama,
@@ -2235,6 +2242,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     keepAlive: `${settings.keepAliveMinutes}m`,
                     numCtx: searchCtx,
                     prefix: messages.slice(0, -1),
+                    tools: chatTools.map((tool) => ({ label: tool.label, description: tool.definition.function.description })),
                     write,
                     steps: reply.steps,
                     stopped: () => gone,
@@ -2247,7 +2255,12 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 logger.warn('[Chat] Web results could not be gathered', { message: String(error?.message || '').slice(0, 200) });
             }
             const last = messages[messages.length - 1];
-            if (found?.text && last?.role === 'user') messages[messages.length - 1] = { role: 'user', content: `${found.text}\n\nTHE USER'S MESSAGE\n${last.content}` };
+            // The rules for using web results are added only when there are results, so a reply that needed no search
+            // is not shaped by them.
+            if (found?.text && last?.role === 'user') {
+                messages[0] = { role: 'system', content: withGuide(chat, messages[0].content, RESULTS_GUIDE) };
+                messages[messages.length - 1] = { role: 'user', content: `${found.text}\n\nTHE USER'S MESSAGE\n${last.content}` };
+            }
         }
         const numCtx = appSearch ? searchCtx : sizeFor(messages);
         let evalCount = 0;
@@ -3018,7 +3031,7 @@ const presentProvider = (provider) => ({
 function presentOnlineDevice(provider) {
     return {
         id: provider.id, name: `${provider.name} (online)`, kind: 'cloud', service: SERVICE, online: true, lastSeenAt: provider.checkedAt, hardware: null, detected: null,
-        overrides: {}, paused: false, edited: false, ollama: { available: provider.health === 'healthy', version: null, modelCount: provider.models.length }
+        overrides: {}, paused: false, edited: false, ollama: { available: provider.health === 'healthy', version: null, modelCount: provider.models.length, chatCount: provider.models.length }
     };
 }
 const PROVIDER_FAULTS = { KEY_REFUSED: 'refused', OUT_OF_CREDIT: 'credit', PROVIDER_BUSY: 'busy' };
