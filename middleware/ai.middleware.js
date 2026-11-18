@@ -1233,7 +1233,9 @@ export const libraryEntries = (models) => models
             parameters,
             sizeMb: known || Math.round(parameters * MB_PER_BILLION),
             sizeEstimated: !known,
-            moe: /^\d+x/.test(size) || /mixture.of.experts|\bmoe\b/i.test(model.description),
+            // A size is mixture-of-experts when its name says so (8x7b, 30b-a3b), or when the whole family is: a family
+            // described as both dense and mixture-of-experts has dense sizes too, so its description alone decides nothing.
+            moe: /^\d+x/.test(size) || /-a\d+(\.\d+)?b$/i.test(size) || (/mixture.of.experts|\bmoe\b/i.test(model.description) && !/\bdense\b/i.test(model.description)),
             capabilities: model.capabilities.filter((ability) => ability !== 'cloud'),
             pulls: model.pulls,
             updated: model.updated
