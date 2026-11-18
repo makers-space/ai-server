@@ -34,6 +34,7 @@ router.validRoutes = [
     '/api/v1/devices/:id/catalogue',
     '/api/v1/skills',
     '/api/v1/skills/:id',
+    '/api/v1/skills/:id/file',
     '/api/v1/chats',
     '/api/v1/chats/:id',
     '/api/v1/chats/:id/messages',
@@ -112,6 +113,7 @@ const withChatId = validateRequest(chatSchemas.chatId, 'params');
 router.get('/skills', ...signedIn, aiController.listSkills);
 router.post('/skills', ...signedIn, validateRequest(skillSchemas.add), aiController.addSkill);
 router.get('/skills/:id', ...signedIn, validateRequest(skillSchemas.skillId, 'params'), aiController.readSkill);
+router.get('/skills/:id/file', ...signedIn, validateRequest(skillSchemas.skillId, 'params'), validateRequest(skillSchemas.file, 'query'), aiController.readSkillFile);
 router.delete('/skills/:id', ...signedIn, validateRequest(skillSchemas.skillId, 'params'), aiController.removeSkill);
 router.get('/chats', ...signedIn, validateRequest(chatSchemas.list, 'query'), aiController.listChats);
 router.post('/chats', ...signedIn, validateRequest(chatSchemas.create), aiController.createChat);

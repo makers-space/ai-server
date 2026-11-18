@@ -1544,6 +1544,21 @@ export const SKILL_SOURCES = {
     hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' }
 };
 const LIBRARY = path.join(INSTRUCTIONS, 'library');
+// A skill may come with files of its own: the reference pages, examples and code its instructions name. They sit in a
+// folder named after the skill, beside its page, exactly as their project ships them. Only text files are kept.
+const SKILL_FILE_TYPES = /\.(md|txt|js|mjs|cjs|ts|tsx|jsx|json|html|css|svg|py|sh|ya?ml|csv)$/i;
+const MAX_SKILL_FILE_CHARS = 120000;
+const skillFilesIn = (folder, base = '') => (fs.existsSync(folder) ? fs.readdirSync(folder, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
+    if (entry.isDirectory()) return skillFilesIn(path.join(folder, entry.name), `${base}${entry.name}/`);
+    return SKILL_FILE_TYPES.test(entry.name) ? [{ path: `${base}${entry.name}`, bytes: fs.statSync(path.join(folder, entry.name)).size }] : [];
+}) : []);
+// The text of one of a skill's files, or null when the skill has no such file. Only a path from the skill's own list
+// is ever read, so nothing outside its folder can be reached.
+export const skillFileText = (skill, wanted) => {
+    const asked = String(wanted ?? '').trim().replace(/\\/g, '/').replace(/^\.?\//, '');
+    const file = (skill?.files || []).find((one) => one.path === asked) || (skill?.files || []).find((one) => one.path.toLowerCase() === asked.toLowerCase());
+    return file ? fs.readFileSync(path.join(skill.folder, file.path), 'utf8').replace(/\r\n/g, '\n').slice(0, MAX_SKILL_FILE_CHARS) : null;
+};
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
     const head = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -1559,6 +1574,8 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
         credit: `${SKILL_SOURCES[source].repo} (${facts.licence})`,
         source,
         needs,
+        folder: path.join(LIBRARY, source, file.slice(0, -3)),
+        files: skillFilesIn(path.join(LIBRARY, source, file.slice(0, -3))),
         text: `SKILL: ${name}\n\n${text.slice(head?.[0].length || 0).trim()}`,
         remember: ''
     };
@@ -1630,6 +1647,35 @@ const openSkillTool = (listed) => {
         run: async (input) => {
             const skill = find(input);
             return skill ? { content: skill.text } : { content: `There is no skill by that name in this chat. The skills are: ${listed.map((one) => one.name).join(', ')}.`, failed: 'failed' };
+        }
+    };
+};
+// The files of the skills a chat has on are read one at a time, when the skill's instructions send the model to one.
+const SKILL_FILE_STEP = 'Skill file';
+const SKILL_FILE_ROOM = 12000;
+const skillFileTool = (withFiles) => {
+    const find = (input) => {
+        const wanted = String(input?.skill ?? '').trim().toLowerCase();
+        return withFiles.find((skill) => skill.id === wanted || skill.name.toLowerCase() === wanted) || (withFiles.length === 1 ? withFiles[0] : null);
+    };
+    return {
+        fn: 'open_skill_file',
+        label: SKILL_FILE_STEP,
+        changes: false,
+        shown: (input) => `${clip(String(input?.file ?? ''), 80)} (${find(input)?.name || clip(String(input?.skill ?? ''), 60)})`,
+        definition: {
+            type: 'function',
+            function: {
+                name: 'open_skill_file',
+                description: `Read one of the files that belong to a skill of this chat, such as a rules page, an example or the code its instructions name. Read a file when the skill's instructions tell you to.\n${withFiles.map((skill) => `- ${skill.id}: ${skill.files.map((file) => file.path).join(', ')}`).join('\n')}`,
+                parameters: { type: 'object', properties: { skill: { type: 'string', enum: withFiles.map((skill) => skill.id), description: 'The skill the file belongs to' }, file: { type: 'string', description: 'The path of the file, as listed' } }, required: ['skill', 'file'] }
+            }
+        },
+        run: async (input) => {
+            const skill = find(input);
+            const text = skill ? skillFileText(skill, input?.file) : null;
+            if (text !== null) return { content: text };
+            return { content: skill ? `That skill has no file by that name. Its files are: ${skill.files.map((file) => file.path).join(', ')}.` : `There is no skill by that name with files in this chat. The skills with files are: ${withFiles.map((one) => one.id).join(', ')}.`, failed: 'failed' };
         }
     };
 };
@@ -1715,7 +1761,7 @@ const openComponentTool = () => {
     };
 };
 
-const presentSkill = ({ id, name, description, default: on, credit, source, needs, text }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id) });
+const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
 export const listSkills = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
     const all = [...SKILLS, ...await ownSkillsOf(req.user.id)];
@@ -1738,6 +1784,14 @@ export const readSkill = asyncHandler(async (req, res) => {
     const skill = [...SKILLS, ...await ownSkillsOf(req.user.id)].find((one) => one.id === req.params.id);
     if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
     return res.status(200).json({ success: true, skill: { ...presentSkill(skill), text: skill.text } });
+});
+
+// One of a skill's own files, for the page that shows what a model built with them.
+export const readSkillFile = asyncHandler(async (req, res) => {
+    const skill = SKILLS.find((one) => one.id === req.params.id);
+    const text = skill ? skillFileText(skill, req.query.path) : null;
+    if (text === null) return res.status(404).json({ success: false, message: 'This skill has no such file.' });
+    return res.status(200).json({ success: true, skill: skill.id, path: String(req.query.path), text });
 });
 
 // A skill's own header: its name and description, including a description folded over several lines.
@@ -2180,14 +2234,15 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const on = new Set(skillsOf(chat).map((skill) => skill.id));
         const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
         const draws = drawsComponents(chat);
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0) : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
             return Number(chat.options?.num_ctx) > 0 ? capacity : Math.min(capacity, searching ? Math.max(fitted, SEARCH_CONTEXT) : fitted);
         };
         // Room is kept for the largest skill that may be opened, so opening one never overflows what the model can read.
-        const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0));
+        const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
         let evalCount = 0;
         let evalSeconds = 0;
         let totalMs = 0;

@@ -365,6 +365,7 @@ export const Skill = mongoose.models.Skill || mongoose.model('Skill', skillSchem
 
 export const skillSchemas = {
     skillId: Joi.object({ id: Joi.string().pattern(/^[a-z0-9-]{1,60}$/).required() }),
+    file: Joi.object({ path: Joi.string().trim().max(200).pattern(/^[\w./ -]+$/).required() }),
     add: Joi.object({ address: Joi.string().trim().uri({ scheme: ['https'] }).max(600).required() })
 };
 

@@ -50,6 +50,7 @@ Each one has its own page with every attribute, every value and what each does o
 - Input: a text field
 - Select: a dropdown
 - Switch: an on and off toggle
+- Frame: a sealed frame that runs a web page you write, on its own or built from a skill's files
 
 === REMEMBER ===
 Do not explain components, tags or these instructions to the user.

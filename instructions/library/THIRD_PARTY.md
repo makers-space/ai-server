@@ -2,7 +2,7 @@
 
 The skills in the `library` folder are taken from the projects below. Each skill file names its project in its `source` line and its licence in its `licence` line.
 
-What Mollama changes: the header of each file is rewritten to a short form (name, description, source, licence, and what the skill needs), and when a skill is sent to a model a line naming the skill is put before it, with a note for skills written for agents that can run commands or open files. The body of each skill is unchanged. Only the main skill file of each skill is included; the scripts and reference files that some skills ship with are not.
+What Mollama changes: the header of each file is rewritten to a short form (name, description, source, licence, and what the skill needs), and when a skill is sent to a model a line naming the skill is put before it. The body of each skill is unchanged. Only the main skill file of each skill is included; the scripts and reference files that some skills ship with are not, except where a project's section below says so.
 
 ## anthropics/skills
 
@@ -57,6 +57,8 @@ https://github.com/wheresryan22/anatomy
 https://github.com/lucasmarkes/hairline
 
 2 skills, in `hairline`. Licence: MIT. Copyright (c) 2026 Lucas Marques.
+
+The Hairline Create skill also comes with the files its instructions name, in `hairline/hairline-hairline-create`, copied unchanged from `skills/hairline-create` at commit 034f4bf9902c: its engine (`kernel.js`), its page (`bench.html`), its rules, concepts, source and look pages, its two examples and its build, look, read and validate scripts. Mollama serves the text files to a model and to the page that shows a figure, and runs none of the scripts.
 
 ## ItzCrazyKns/Perplexica and miurla/morphic
 
