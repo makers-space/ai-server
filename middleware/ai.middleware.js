@@ -1005,9 +1005,12 @@ const realRemote = {
 let remote = realRemote;
 let remoteRetryMs = 1500;
 
+// Returns what was in place before, so a test can put it back.
 export const setRemoteTransport = (replacement) => {
+    const before = remote === realRemote ? null : remote;
     remote = replacement ? { ...realRemote, ...replacement } : realRemote;
     remoteRetryMs = replacement ? 0 : 1500;
+    return before;
 };
 
 export const fetchRemote = async (address, redirects = 0, retried = false) => {
@@ -1470,12 +1473,22 @@ export const finishToolSignIn = (address, keeper, params) => toolFinisher(addres
 export const MAX_SERVER_TOOLS = 200;
 export const readTools = async (client) => {
     const { tools = [] } = await client.listTools();
-    return tools.slice(0, MAX_SERVER_TOOLS).map((tool) => ({
-        name: String(tool.name).slice(0, 120),
-        title: tool.title || tool.annotations?.title || null,
-        description: String(tool.description || '').slice(0, 600),
+    // Only what can be stored is kept: an app's odd title or an oversized description of a tool's inputs must not make the check fail.
+    const text = (value, most) => (typeof value === 'string' && value.trim() ? value.slice(0, most) : null);
+    const inputOf = (schema) => {
+        if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return null;
+        try {
+            return JSON.stringify(schema).length <= 20000 ? schema : { type: 'object' };
+        } catch {
+            return null;
+        }
+    };
+    return (Array.isArray(tools) ? tools : []).filter((tool) => text(tool?.name, 120)).slice(0, MAX_SERVER_TOOLS).map((tool) => ({
+        name: text(tool.name, 120),
+        title: text(tool.title, 200) || text(tool.annotations?.title, 200),
+        description: text(tool.description, 600) || '',
         readOnly: tool.annotations?.readOnlyHint === true,
-        input: tool.inputSchema || null
+        input: inputOf(tool.inputSchema)
     }));
 };
 

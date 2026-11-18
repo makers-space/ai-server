@@ -9,7 +9,7 @@ import mongoose from 'mongoose';
 import logger from '../utils/app.logger.js';
 import { asyncHandler, getNotificationService } from '../middleware/app.middleware.js';
 import { hasRight, RIGHTS } from '../config/rights.js';
-import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider } from '../models/ai.model.js';
+import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
@@ -1533,6 +1533,7 @@ const OWN_SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((fil
 // The projects the library's skills come from, in the order they are listed.
 export const SKILL_SOURCES = {
     mollama: { name: 'Mollama', repo: null },
+    mine: { name: 'My skills', repo: null },
     anthropic: { name: 'Anthropic', repo: 'anthropics/skills' },
     engineering: { name: 'Engineering (Matt Pocock)', repo: 'mattpocock/skills' },
     marketing: { name: 'Marketing (Corey Haines)', repo: 'coreyhaines31/marketingskills' },
@@ -1569,7 +1570,36 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
 export const SKILLS = [...OWN_SKILLS, ...LIBRARY_SKILLS];
 // A skill is one to eight thousand tokens of instructions, so a chat holds only a few at once.
 export const MAX_CHAT_SKILLS = 8;
-const skillsOf = (chat) => SKILLS.filter((skill) => (Array.isArray(chat.skills) ? chat.skills.includes(skill.id) : skill.default));
+// Short skills that need no commands or files and work as a conversation, so a small model can follow them.
+export const SUGGESTED_SKILLS = ['engineering-grilling', 'dex-brainstorming', 'engineering-to-questionnaire', 'engineering-writing-shape', 'dex-decision-log', 'dex-weekly-reflection', 'dex-delegate-check'];
+
+// The skills a person added by address are kept with their account. They are read once and remembered for a minute,
+// so building a chat's instructions does not wait on the database.
+export const MAX_OWN_SKILLS = 50;
+const MAX_SKILL_BYTES = 120 * 1024;
+const ownSkillCache = new Map();
+const skillNeeds = (body) => [
+    /\b(python3?|pip|npx|npm|node|uv|docker|brew)\s+[\w./-]|scripts\/[\w.-]+|```(bash|sh|shell|zsh)\n/i.test(body) && 'commands',
+    /\b(references?|resources?|assets|templates?|examples?|rules|docs)\/[\w./-]+\.\w+|\]\((?!https?:|#)[^)]+\.(md|txt|json|ya?ml|py|sh|js|ts)\)/i.test(body) && 'files'
+].filter(Boolean);
+const ownSkill = (doc) => {
+    const needs = skillNeeds(doc.text);
+    return {
+        id: `mine-${doc.id}`, name: doc.name, description: doc.description || '', default: false, order: 200, credit: doc.address, source: 'mine', needs,
+        text: [`SKILL: ${doc.name}`, needs.length > 0 && AGENT_NOTE, doc.text].filter(Boolean).join('\n\n'), touch: '', remember: ''
+    };
+};
+const ownSkillsOf = async (userId) => {
+    const key = String(userId);
+    const kept = ownSkillCache.get(key);
+    if (kept && Date.now() - kept.at < 60000) return kept.skills;
+    const skills = (await Skill.find({ service: SERVICE, owner: userId }).sort({ name: 1 })).map(ownSkill);
+    if (ownSkillCache.size >= 2000) ownSkillCache.delete(ownSkillCache.keys().next().value);
+    ownSkillCache.set(key, { at: Date.now(), skills });
+    return skills;
+};
+const skillsFor = (ownerId) => [...SKILLS, ...(ownSkillCache.get(String(ownerId))?.skills || [])];
+const skillsOf = (chat) => skillsFor(chat.owner).filter((skill) => (Array.isArray(chat.skills) ? chat.skills.includes(skill.id) : skill.default));
 const closingOf = (chat) => ['REMEMBER', assistantGuide.part('REMEMBER'), ...skillsOf(chat).map((skill) => skill.remember)].filter(Boolean).join('\n');
 // Extra guidance for one reply goes in before the closing reminder, which stays the last thing the model reads.
 const withGuide = (chat, content, guide) => {
@@ -1587,19 +1617,117 @@ export const TOUCH_GUIDE = SKILLS.find((skill) => skill.id === 'components').tou
 const TOUCH_EVERY = 4;
 export const REVIEW_GUIDE = searchGuide.part('SEARCH REVIEW');
 
+const presentSkill = ({ id, name, description, default: on, credit, source, needs, text }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id) });
+// What every chat is sent besides its skills, shown so a person can read exactly what shapes the replies.
+const alwaysSent = () => [
+    { id: 'base-assistant', name: 'Base instructions', description: 'Sent with every chat.', text: BASE_GUIDE },
+    { id: 'base-tools', name: 'Tool rules', description: 'Sent only when a chat has tools on.', text: TOOLS_GUIDE },
+    { id: 'base-search-plan', name: 'Web search: deciding what to search', description: 'Used only when web search is on, to decide whether a message needs a search.', text: PLAN_GUIDE },
+    { id: 'base-search-results', name: 'Web search: using what was found', description: 'Sent only with a message for which pages were found.', text: RESULTS_GUIDE }
+].map((guide) => ({ ...guide, default: false, credit: null, source: 'always', needs: [] }));
+
 export const listSkills = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
+    const all = [...SKILLS, ...await ownSkillsOf(req.user.id)];
     res.status(200).json({
         success: true,
         webSearch: webSearchReady(),
-        skills: SKILLS.map(({ id, name, description, default: on, credit, source, needs, text }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text) })),
-        sources: Object.entries(SKILL_SOURCES).map(([id, source]) => ({ id, name: source.name, repo: source.repo, count: SKILLS.filter((skill) => skill.source === id).length })).filter((source) => source.count > 0),
+        skills: all.map(presentSkill),
+        sources: Object.entries(SKILL_SOURCES).map(([id, source]) => ({ id, name: source.name, repo: source.repo, count: all.filter((skill) => skill.source === id).length })).filter((source) => source.count > 0),
+        always: alwaysSent().map(presentSkill),
         maxSkills: MAX_CHAT_SKILLS,
+        maxOwnSkills: MAX_OWN_SKILLS,
         tools: [
             ...BUILTIN_TOOLS.map(({ id, name, description }) => ({ id, name, description, kind: 'builtin', ready: true, count: 1 })),
             ...servers.map((server) => ({ id: server.id, name: server.name, description: null, kind: server.kind, ready: server.health === 'healthy', state: TOOL_HEALTH[server.health].label, count: server.tools.length }))
         ]
     });
+});
+
+// The whole text of one skill, for reading before it is turned on.
+export const readSkill = asyncHandler(async (req, res) => {
+    const skill = [...alwaysSent(), ...SKILLS, ...await ownSkillsOf(req.user.id)].find((one) => one.id === req.params.id);
+    if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
+    return res.status(200).json({ success: true, skill: { ...presentSkill(skill), text: skill.text } });
+});
+
+// A skill's own header: its name and description, including a description folded over several lines.
+const skillHeader = (text) => {
+    const head = text.match(/^---\n([\s\S]*?)\n---\n?/);
+    const lines = (head?.[1] || '').split('\n');
+    const facts = {};
+    for (let index = 0; index < lines.length; index++) {
+        const match = lines[index].match(/^([\w-]+):\s*(.*)$/);
+        if (!match) continue;
+        let value = match[2].trim();
+        if (/^[>|][-+]?$/.test(value) || value === '') {
+            const more = [];
+            while (index + 1 < lines.length && /^\s+\S/.test(lines[index + 1])) more.push(lines[++index].trim());
+            value = more.join(' ');
+        }
+        facts[match[1]] = value.replace(/^(["'])([\s\S]*)\1$/, '$2').replace(/\s+/g, ' ').trim();
+    }
+    return { facts, body: text.slice(head?.[0].length || 0).trim() };
+};
+// Where a skill's file is read from: a GitHub page address is turned into the address of the file itself.
+export const skillFileAddress = (address) => {
+    const url = new URL(address);
+    if (url.hostname !== 'github.com') return url.href;
+    const [owner, repo, kind, branch, ...rest] = url.pathname.split('/').filter(Boolean);
+    if (!owner || !repo) return url.href;
+    const file = rest.join('/');
+    const path = kind === 'blob' ? file : [file, 'SKILL.md'].filter(Boolean).join('/');
+    return `https://raw.githubusercontent.com/${owner}/${repo.replace(/\.git$/, '')}/${['blob', 'tree'].includes(kind) && branch ? branch : 'HEAD'}/${path}`;
+};
+
+// Adds a skill from its address, or reads it again when the person already has it.
+export const addSkill = asyncHandler(async (req, res) => {
+    const address = req.body.address;
+    const existing = await Skill.findOne({ service: SERVICE, owner: req.user.id, address });
+    if (!existing && await Skill.countDocuments({ service: SERVICE, owner: req.user.id }) >= MAX_OWN_SKILLS) {
+        return res.status(422).json({ success: false, message: `You have ${MAX_OWN_SKILLS} skills of your own, which is the limit.`, action: 'Remove one you no longer use.' });
+    }
+    let text = '';
+    try {
+        const { stream } = await fetchRemote(skillFileAddress(address));
+        const chunks = [];
+        let size = 0;
+        for await (const chunk of stream) {
+            size += chunk.length;
+            if (size > MAX_SKILL_BYTES) {
+                stream.destroy?.();
+                return res.status(422).json({ success: false, message: 'That skill is larger than 120 KB, which is more than a chat can hold.', action: 'Add a shorter skill.' });
+            }
+            chunks.push(chunk);
+        }
+        text = Buffer.concat(chunks).toString('utf8').replace(/\r\n/g, '\n').replace(/^\uFEFF/, '');
+    } catch (error) {
+        return sendOllamaError(res, error);
+    }
+    const { facts, body } = skillHeader(text);
+    if (!body || /^\s*<(!doctype|html)/i.test(text) || text.includes('\u0000')) {
+        return res.status(422).json({ success: false, message: 'That address is not a skill file.', action: 'Paste the address of a SKILL.md file, or of the folder on GitHub that holds one.' });
+    }
+    const folder = new URL(skillFileAddress(address)).pathname.split('/').filter(Boolean).slice(-2, -1)[0] || 'Skill';
+    const fields = {
+        name: String(facts.name || folder).replace(/[-_]+/g, ' ').replace(/^./, (letter) => letter.toUpperCase()).slice(0, 120),
+        description: String(facts.description || body.split('\n').find((line) => line.trim() && !line.startsWith('#')) || '').slice(0, 400),
+        text: body,
+        checkedAt: new Date()
+    };
+    const skill = existing ? Object.assign(existing, fields) : new Skill({ owner: req.user.id, address, ...fields });
+    await skill.save();
+    ownSkillCache.delete(String(req.user.id));
+    logger.info('[Skills] Skill added', { skillId: skill.id, userId: req.user.id });
+    return res.status(existing ? 200 : 201).json({ success: true, skill: presentSkill(ownSkill(skill)) });
+});
+
+export const removeSkill = asyncHandler(async (req, res) => {
+    const id = req.params.id.replace(/^mine-/, '');
+    const skill = mongoose.isValidObjectId(id) ? await Skill.findOneAndDelete({ _id: id, service: SERVICE, owner: req.user.id }) : null;
+    if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
+    ownSkillCache.delete(String(req.user.id));
+    return res.status(200).json({ success: true, message: 'Skill removed.' });
 });
 
 const MAX_PROMPTS = 100;
@@ -1725,6 +1853,7 @@ const factsOrNull = async (chat) => {
 };
 
 const findChat = async (req, res) => {
+    await ownSkillsOf(req.user.id);
     const chat = await Chat.findOne({ _id: req.params.id, service: SERVICE, owner: req.user.id });
     if (!chat) res.status(404).json({ success: false, message: 'Chat not found' });
     return chat;
@@ -1759,7 +1888,7 @@ const applyChatFields = (chat, body) => {
     for (const key of ['title', 'model', 'system', 'options', 'webSearch']) {
         if (key in body) chat[key] = body[key];
     }
-    if ('skills' in body) chat.skills = body.skills ? SKILLS.filter((skill) => body.skills.includes(skill.id)).map((skill) => skill.id).slice(0, MAX_CHAT_SKILLS) : undefined;
+    if ('skills' in body) chat.skills = body.skills ? skillsFor(chat.owner).filter((skill) => body.skills.includes(skill.id)).map((skill) => skill.id).slice(0, MAX_CHAT_SKILLS) : undefined;
     if ('tools' in body) {
         chat.tools = body.tools?.length ? [...new Set(body.tools)] : undefined;
         chat.allowedTools = undefined;
@@ -1804,6 +1933,7 @@ const setChatDevice = async (req, chat) => {
 };
 
 export const createChat = asyncHandler(async (req, res) => {
+    await ownSkillsOf(req.user.id);
     const chat = new Chat({ owner: req.user.id });
     applyChatFields(chat, req.body || {});
     if (!(await setChatDevice(req, chat))) return res.status(404).json({ success: false, message: 'Device not found' });

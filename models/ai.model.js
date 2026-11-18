@@ -349,6 +349,25 @@ providerSchema.index({ service: 1, owner: 1, kind: 1 }, { unique: true });
 export const Provider = mongoose.models.Provider || mongoose.model('Provider', providerSchema);
 
 const providerKey = Joi.string().trim().min(8).max(4000).required();
+// A skill a person added by its address. The text is kept as it was read, so it does not change under them.
+const skillSchema = new mongoose.Schema({
+    service: { type: String, default: SERVICE, immutable: true, index: true },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    description: { type: String, default: '', maxlength: 400 },
+    text: { type: String, required: true },
+    address: { type: String, required: true, maxlength: 600 },
+    checkedAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+skillSchema.index({ service: 1, owner: 1, address: 1 }, { unique: true });
+
+export const Skill = mongoose.models.Skill || mongoose.model('Skill', skillSchema);
+
+export const skillSchemas = {
+    skillId: Joi.object({ id: Joi.string().pattern(/^[a-z0-9-]{1,60}$/).required() }),
+    add: Joi.object({ address: Joi.string().trim().uri({ scheme: ['https'] }).max(600).required() })
+};
+
 export const providerSchemas = {
     providerId: Joi.object({ id: Joi.objectId().required() }),
     add: Joi.object({ kind: Joi.string().pattern(/^[a-z]{2,20}$/).required(), key: providerKey }),

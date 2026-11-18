@@ -4,7 +4,7 @@ import * as authMiddleware from '../middleware/auth.middleware.js';
 import { RIGHTS } from '../config/rights.js';
 import { noCacheResponse } from '../middleware/cache.middleware.js';
 import { validateRequest } from '../middleware/validation.middleware.js';
-import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas, toolSchemas, providerSchemas } from '../models/ai.model.js';
+import { deviceSchemas, modelSchemas, chatSchemas, promptSchemas, guideSchemas, toolSchemas, providerSchemas, skillSchemas } from '../models/ai.model.js';
 
 const router = Router();
 
@@ -33,6 +33,7 @@ router.validRoutes = [
     '/api/v1/catalogue',
     '/api/v1/devices/:id/catalogue',
     '/api/v1/skills',
+    '/api/v1/skills/:id',
     '/api/v1/chats',
     '/api/v1/chats/:id',
     '/api/v1/chats/:id/messages',
@@ -109,6 +110,9 @@ router.get('/devices/:id/catalogue', ...signedIn, withDeviceId, validateRequest(
 const withChatId = validateRequest(chatSchemas.chatId, 'params');
 
 router.get('/skills', ...signedIn, aiController.listSkills);
+router.post('/skills', ...signedIn, validateRequest(skillSchemas.add), aiController.addSkill);
+router.get('/skills/:id', ...signedIn, validateRequest(skillSchemas.skillId, 'params'), aiController.readSkill);
+router.delete('/skills/:id', ...signedIn, validateRequest(skillSchemas.skillId, 'params'), aiController.removeSkill);
 router.get('/chats', ...signedIn, validateRequest(chatSchemas.list, 'query'), aiController.listChats);
 router.post('/chats', ...signedIn, validateRequest(chatSchemas.create), aiController.createChat);
 router.get('/chats/:id', ...signedIn, withChatId, aiController.getChat);
