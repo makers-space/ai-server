@@ -69,7 +69,7 @@ const manager = [aiController.requireDatabase, authMiddleware.verifyToken(), aut
 const withDeviceId = validateRequest(deviceSchemas.deviceId, 'params');
 
 router.use('/devices', aiController.announceChanges('device:changed'));
-router.use('/models', aiController.announceChanges('models:changed'));
+router.use('/models', aiController.announceChanges('models:changed', ['/load']));
 router.use('/chats', aiController.announceChanges('chat:changed'));
 
 router.get('/devices', ...signedIn, aiController.listDevices);

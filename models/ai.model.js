@@ -340,7 +340,7 @@ const providerSchema = new mongoose.Schema({
     kind: { type: String, required: true },
     name: { type: String, required: true },
     sealed: { type: String, default: null, select: false },
-    models: { type: [new mongoose.Schema({ name: String, contextLength: Number, vision: Boolean, maxOutput: Number }, { _id: false })], default: [] },
+    models: { type: [new mongoose.Schema({ name: String, title: String, contextLength: Number, vision: Boolean, maxOutput: Number }, { _id: false })], default: [] },
     health: { type: String, enum: PROVIDER_HEALTH_STATES, default: 'unchecked' },
     checkedAt: { type: Date, default: null }
 }, { timestamps: true });

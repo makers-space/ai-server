@@ -11,7 +11,7 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
+    OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
@@ -114,11 +114,11 @@ const canManage = (req) => hasRight(req.user.roles, RIGHTS.MANAGE_MODELS);
 
 // Once a change has been answered successfully, the person's other open apps are told, so their pages bring themselves
 // up to date. The first part of the path, when it is an id, says which chat or computer changed.
-export const announceChanges = (type) => (req, res, next) => {
+export const announceChanges = (type, quiet = []) => (req, res, next) => {
     // The path is read now: by the time the answer has gone out it no longer starts where this part of the router does.
     const path = req.path;
     res.on('finish', () => {
-        if (req.method === 'GET' || res.statusCode >= 300 || !req.user?.id) return;
+        if (req.method === 'GET' || res.statusCode >= 300 || !req.user?.id || quiet.includes(path)) return;
         const id = path.match(/^\/([0-9a-f]{24})(?:\/|$)/)?.[1] || null;
         const removed = req.method === 'DELETE' && /^\/[0-9a-f]{24}\/?$/.test(path);
         getNotificationService().sendToUser(String(req.user.id), { type, data: { id, removed } });
@@ -161,7 +161,9 @@ const LOCAL_TARGET = { kind: 'local', id: null };
 const NO_TARGET = { kind: 'none', id: null };
 const DEVICE_HOST = 'http://device.mollama';
 // A hosted server has no Ollama of its own, so in production its computer is not a device unless asked for.
-const localEnabled = () => (process.env.LOCAL_DEVICE ? process.env.LOCAL_DEVICE === 'true' : process.env.NODE_ENV !== 'production');
+// A server is never one of a person's computers: models run only on computers linked through the desktop app.
+// The test suite alone switches this on, to stand in for a computer with Ollama.
+const localEnabled = () => process.env.LOCAL_DEVICE === 'true';
 const currentTarget = () => deviceScope.getStore() || (localEnabled() ? LOCAL_TARGET : NO_TARGET);
 // Paused computers stay connected but are given no work. The set follows the saved flag each time a computer is looked up.
 const pausedDevices = new Set();
@@ -506,9 +508,9 @@ class DownloadManager extends EventEmitter {
             finishedAt: FINAL_STATES.includes(outcome) ? new Date() : null
         };
         Object.assign(doc, result);
-        Object.assign(state, { status: outcome, errorCode, finishedAt: result.finishedAt, stalled: false, speedBps: 0 });
-
+        // The record is saved before the live state says finished, so no page reads "completed" ahead of the record.
         await this.save(doc, result, { final: true });
+        Object.assign(state, { status: outcome, errorCode, finishedAt: result.finishedAt, stalled: false, speedBps: 0 });
 
         this.announce(doc);
         if (outcome === 'completed') await this.clearFailed(doc.model, doc.id);
@@ -720,9 +722,12 @@ export const useDevice = (req, res, next) => {
     pickTarget(req.user.id, req.get('X-Mollama-Device') || req.query?.device).then((target) => deviceScope.run(target, next), next);
 };
 
+// A computer still called by its network name is shown with a readable one; a name the person gave is kept as it is.
+const shownName = (device) => (device.kind === 'companion' && device.name === String(device.hostname || '').split(':').slice(1).join(':') ? computerName(device.name) : device.name);
+
 const presentDevice = (device, ollama) => ({
     id: device.id,
-    name: device.name,
+    name: shownName(device),
     kind: device.kind,
     service: device.service,
     online: isOnline(device),
@@ -809,10 +814,15 @@ export const linkDevice = asyncHandler(async (req, res) => {
         },
         { new: true, upsert: true, setDefaultsOnInsert: true }
     );
+    // The computer's own name, when the desktop app sends one, replaces a name that is still only its network name.
+    if (name && device.name === hostname && name !== hostname) {
+        device.name = name;
+        await device.save();
+    }
     deviceGateway.disconnect(device.id);
     logger.info('[Device] Device linked', { deviceId: device.id, userId: req.user.id });
 
-    res.status(201).json({ success: true, device: { id: device.id, name: device.name }, key });
+    res.status(201).json({ success: true, device: { id: device.id, name: shownName(device) }, key });
 });
 
 export const unlinkDevice = asyncHandler(async (req, res) => {
@@ -948,7 +958,7 @@ export const getSetupStatus = asyncHandler(async (req, res) => {
         ollama: ollama.available
             ? ollama
             : { ...ollama, ...new OllamaError(problem).toJSON() },
-        device: device ? { id: device.id, name: device.name, kind: target.kind, detected: Boolean(device.hardware) } : null,
+        device: device ? { id: device.id, name: shownName(device), kind: target.kind, detected: Boolean(device.hardware) } : null,
         steps: {
             ollama: ollama.available,
             device: Boolean(device?.hardware),
@@ -1007,11 +1017,11 @@ const describeInstalled = async (ollama, model, personalByName) => {
 const listOnlineModels = async (req, res) => {
     const provider = await Provider.findOne({ _id: currentTarget().id, service: SERVICE });
     const models = (provider?.models || []).map((model) => ({
-        name: model.name, displayName: model.name, description: '', sizeBytes: 0, family: null, parameterSize: null, quantization: null,
+        name: model.name, displayName: model.title || knownModels.get(model.name.replace(/[-:]cloud$/i, ''))?.name || cloudTitle(model.name), description: '', sizeBytes: 0, family: null, parameterSize: null, quantization: null,
         contextLength: model.contextLength || null, capabilities: ['completion', 'tools', ...(model.vision ? ['vision'] : [])], modifiedAt: null, personal: false,
         fit: { verdict: 'cloud', label: 'Online', fits: true }, ready: true, canChat: true, usedBy: []
     }));
-    res.status(200).json({ success: true, ollamaAvailable: provider?.health === 'healthy', ollamaVersion: null, webSearch: false, models, disk: { usedByModelsMb: 0, freeMb: 0, totalMb: 0 }, online: true, permissions: { manage: false } });
+    res.status(200).json({ success: true, device: currentTarget().id || null, ollamaAvailable: provider?.health === 'healthy', ollamaVersion: null, webSearch: false, models, disk: { usedByModelsMb: 0, freeMb: 0, totalMb: 0 }, online: true, permissions: { manage: false } });
 };
 
 export const listModels = asyncHandler(async (req, res) => {
@@ -1023,6 +1033,7 @@ export const listModels = asyncHandler(async (req, res) => {
     if (!status.available) {
         return res.status(200).json({
             success: true,
+            device: currentTarget().id || null,
             ollamaAvailable: false,
             ollamaVersion: null,
             webSearch: webSearchReady(),
@@ -1055,6 +1066,7 @@ export const listModels = asyncHandler(async (req, res) => {
 
     res.status(200).json({
         success: true,
+        device: currentTarget().id || null,
         ollamaAvailable: true,
         ollamaVersion: status.version,
         webSearch: webSearchReady(),
@@ -2565,6 +2577,7 @@ export const summariseChat = asyncHandler(async (req, res) => {
         title: `${chat.title} (continued)`.slice(0, 120),
         titled: true,
         model: chat.model,
+        device: chat.device,
         system: chat.system,
         systemSource: chat.systemSource,
         instructions: chat.instructions,
@@ -3017,7 +3030,7 @@ const checkProvider = async (provider) => {
         const client = createCloudClient(entry, unseal(provider.sealed)?.key);
         await client.prove();
         const { models } = await client.list();
-        provider.models = models.slice(0, 500).map((model) => ({ name: model.name, contextLength: model.cloud?.contextLength || null, vision: Boolean(model.cloud?.vision), maxOutput: model.cloud?.maxOutput || null }));
+        provider.models = models.slice(0, 500).map((model) => ({ name: model.name, title: model.cloud?.title || null, contextLength: model.cloud?.contextLength || null, vision: Boolean(model.cloud?.vision), maxOutput: model.cloud?.maxOutput || null }));
         provider.health = provider.models.length > 0 ? 'healthy' : 'empty';
     } catch (error) {
         provider.health = PROVIDER_FAULTS[mapOllamaError(error).code] || 'unreachable';

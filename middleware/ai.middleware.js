@@ -311,6 +311,7 @@ export class DeviceGateway extends EventEmitter {
         this.devices = new Map();
         this.counter = 0;
         this.helloMs = 10000;
+        this.pingMs = 25000;
         this.askMs = 15000;
     }
 
@@ -329,7 +330,13 @@ export class DeviceGateway extends EventEmitter {
             } catch {
                 hello = null;
             }
-            const deviceId = hello ? await Promise.resolve(verify(hello)).catch(() => null) : null;
+            let deviceId = null;
+            try {
+                deviceId = hello ? await verify(hello) : null;
+            } catch {
+                // The hello could not be checked just now (database slow, server starting): the app keeps its link and tries again.
+                return ws.close(1011, 'Try again');
+            }
             if (!deviceId) return ws.close(1008, 'Device not recognised');
             return this.attach(String(deviceId), ws, hello);
         });
@@ -354,7 +361,17 @@ export class DeviceGateway extends EventEmitter {
             }
             entry.pending.get(String(message.id))?.[message.type]?.(message);
         });
+        let answered = true;
+        ws.on('pong', () => { answered = true; });
+        const beat = setInterval(() => {
+            if (!answered) return ws.terminate();
+            answered = false;
+            try { ws.ping(); } catch { /* closing */ }
+            return undefined;
+        }, this.pingMs);
+        beat.unref?.();
         ws.on('close', () => {
+            clearInterval(beat);
             const current = this.devices.get(deviceId) === entry;
             if (current) this.devices.delete(deviceId);
             for (const waiting of [...entry.pending.values()]) waiting.fail();
@@ -1115,6 +1132,21 @@ const libraryPage = async (address, more = false) => {
 };
 
 // "gemma3:12b" reads as "Gemma 3 12B"; the Ollama name is always shown beside it.
+// A computer's network name made readable, for computers the person has not named: the network part is dropped and
+// a Mac's own pattern spelled out ("Davids-MacBook-Pro.local" becomes "David's MacBook Pro").
+export const computerName = (hostname) => {
+    const bare = String(hostname || '').split('.')[0] || String(hostname || '');
+    if (!/mac|imac|mbp/i.test(bare)) return bare;
+    return bare.replace(/[-_]+/g, ' ').replace(/\bMBP\b/i, 'MacBook Pro').replace(/\b([A-Za-z]+?)s (MacBook|iMac|Mac)\b/, "$1's $2").trim();
+};
+
+// An online service's model id made readable when the service gives no name of its own: date stamps and "cloud"
+// marks dropped, and version numbers joined ("claude-sonnet-4-5-20250929" becomes "Claude Sonnet 4.5").
+export const cloudTitle = (id) => {
+    const bare = String(id).replace(/^models\//, '').replace(/[-:]cloud$/i, '').replace(/-(\d{8}|\d{4}-\d{2}-\d{2}|latest)$/i, '');
+    return friendlyName(bare).replace(/\b(\d) (\d)\b/g, '$1.$2').replace(/\b(\d+(?:\.\d+)?)([bmt])\b/g, (whole, size, unit) => size + unit.toUpperCase());
+};
+
 export const friendlyName = (tag) => {
     const [name, size = ''] = String(tag).split(':');
     if (name.includes('/')) return String(tag);
@@ -1825,7 +1857,7 @@ export const createCloudClient = (entry, key, known = []) => {
                         name: model.id,
                         size: 0,
                         details: {},
-                        cloud: { contextLength: model.max_input_tokens || null, maxOutput: model.max_tokens || null, vision: Boolean(model.capabilities?.image_input?.supported ?? model.capabilities?.image_input) }
+                        cloud: { title: model.display_name || null, contextLength: model.max_input_tokens || null, maxOutput: model.max_tokens || null, vision: Boolean(model.capabilities?.image_input?.supported ?? model.capabilities?.image_input) }
                     }))
                 };
             },
@@ -1878,6 +1910,7 @@ export const createCloudClient = (entry, key, known = []) => {
                     size: 0,
                     details: {},
                     cloud: {
+                        title: [model.display_name, model.displayName, model.name].find((text) => typeof text === 'string' && text.trim() && text !== model.id) || null,
                         contextLength: model.context_length || model.context_window || model.max_input_tokens || model.max_context_length || null,
                         vision: Boolean(model.supports_image_in || model.capabilities?.vision || model.capabilities?.image_input || model.architecture?.input_modalities?.includes?.('image') || model.input_modalities?.includes?.('image'))
                     }

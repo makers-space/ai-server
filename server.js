@@ -425,6 +425,8 @@ class Server {
 
             try {
                 appMiddleware.getNotificationService().shutdown();
+                // Open sockets are closed as "restarting", so desktop apps reconnect to the server that replaces this one.
+                this.wss?.clients.forEach((client) => client.close(1012, 'Restarting'));
                 this.wss?.close();
                 this.wss = null;
             } catch (error) {
