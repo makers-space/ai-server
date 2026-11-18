@@ -39,6 +39,7 @@ const liveCatalogue = async (query, hardware) => {
     const models = await libraryModels();
     const words = String(query?.q || '').toLowerCase().split(/\s+/).filter(Boolean);
     const page = Number(query?.page) || 1;
+    const size = Number(query?.size) || CATALOGUE_PAGE;
     const popular = new Set([...models].sort((a, b) => b.pulls - a.pulls).slice(0, POPULAR_MODELS).map((model) => model.name));
     const matching = models.filter((model) => words.every((word) => `${model.name} ${model.description}`.toLowerCase().includes(word)));
     await loadLibrarySizes(matching.filter((model) => popular.has(model.name)).map((model) => model.name));
@@ -71,7 +72,7 @@ const liveCatalogue = async (query, hardware) => {
             ...picked
         ];
     };
-    const shown = (all) => (sampled ? sample(all) : everything ? all : all.slice((page - 1) * CATALOGUE_PAGE, page * CATALOGUE_PAGE));
+    const shown = (all) => (sampled ? sample(all) : everything ? all : all.slice((page - 1) * size, page * size));
 
     // The page about to be shown gets its exact sizes, then the order is worked out again with them.
     await loadLibrarySizes(shown(order()).map((entry) => entry.tag.split(':')[0]));
@@ -87,7 +88,8 @@ const liveCatalogue = async (query, hardware) => {
         entries,
         query: words.join(' '),
         page,
-        more: !everything && !sampled && page * CATALOGUE_PAGE < all.length,
+        size,
+        more: !everything && !sampled && page * size < all.length,
         local: all.filter((entry) => !entry.cloudOnly),
         total: all.length,
         library: models.length,
@@ -1280,6 +1282,7 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
         source: 'ollama.com',
         query: live.query,
         page: live.page,
+        size: live.size,
         more: live.more,
         total: live.total,
         library: live.library,
@@ -1312,6 +1315,7 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
         source: 'ollama.com',
         query: live.query,
         page: live.page,
+        size: live.size,
         more: live.more,
         total: live.total,
         library: live.library,
