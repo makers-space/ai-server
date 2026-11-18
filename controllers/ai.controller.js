@@ -2148,10 +2148,11 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         // when to use them; nothing of Mollama's own is added to tell it how.
         const searching = webSearchReady() && chat.webSearch !== false && facts.capabilities.includes('tools');
         const messages = [...prompt];
+        // With web search on, its own page reader does the built-in one's job, so only one of the two is offered.
         const { listed } = sortSkills(chat, facts.capabilities.includes('tools'));
         const on = new Set(skillsOf(chat).map((skill) => skill.id));
         const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
-        const chatTools = facts.capabilities.includes('tools') ? [...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...await toolsForChat(chat, userId)] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -3060,10 +3061,10 @@ const textOfResult = (result) => {
 
 // Every tool the chat may use this turn, each with the name the model calls it by and the way to run it.
 const toolsForChat = async (chat, userId) => {
+    // The built-in tools are always there for a model that can use tools; a chat chooses only among its connected tools.
     const chosen = chat.tools || [];
-    if (chosen.length === 0) return [];
     const taken = new Set(['web_search', 'web_fetch']);
-    const tools = BUILTIN_TOOLS.filter((tool) => chosen.includes(tool.id)).map((tool) => {
+    const tools = BUILTIN_TOOLS.map((tool) => {
         taken.add(tool.id);
         return { fn: tool.id, label: tool.name, changes: false, definition: { type: 'function', function: { name: tool.id, description: tool.description, parameters: tool.parameters } }, run: async (input) => ({ content: await tool.run(input), failed: null }) };
     });
