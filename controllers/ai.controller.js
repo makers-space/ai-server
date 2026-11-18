@@ -160,10 +160,10 @@ const deviceScope = new AsyncLocalStorage();
 const LOCAL_TARGET = { kind: 'local', id: null };
 const NO_TARGET = { kind: 'none', id: null };
 const DEVICE_HOST = 'http://device.mollama';
-// A hosted server has no Ollama of its own, so in production its computer is not a device unless asked for.
-// A server is never one of a person's computers: models run only on computers linked through the desktop app.
-// The test suite alone switches this on, to stand in for a computer with Ollama.
-const localEnabled = () => process.env.LOCAL_DEVICE === 'true';
+// A Mollama server is never one of a person's computers, in development, staging or production: models run only on
+// computers linked through the desktop app. Only the test suite can switch this on, to stand in for a computer with
+// Ollama; no setting turns it on for a running server.
+const localEnabled = () => process.env.NODE_ENV === 'test' && process.env.LOCAL_DEVICE === 'true';
 const currentTarget = () => deviceScope.getStore() || (localEnabled() ? LOCAL_TARGET : NO_TARGET);
 // Paused computers stay connected but are given no work. The set follows the saved flag each time a computer is looked up.
 const pausedDevices = new Set();
