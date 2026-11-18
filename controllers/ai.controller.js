@@ -1634,6 +1634,44 @@ const openSkillTool = (listed) => {
         }
     };
 };
+// The level above a chat's own skills is the whole library, searched by a few words. A model cannot turn a skill on:
+// it names the one that would help, and the person turns it on.
+const LIBRARY_STEP = 'Skill library';
+// Whole words are matched, so "app" does not find "Apple"; a longer word also finds its other endings ("planning", "plans").
+const FILLER_WORDS = new Set(['the', 'and', 'for', 'with', 'new', 'how', 'can', 'you', 'your', 'help', 'make', 'need', 'want', 'about', 'that', 'this']);
+const wordIn = (text, word) => {
+    const stem = word.replace(/(ing|ed|es|s)$/, '');
+    return new RegExp(stem.length < 5 ? `\\b${stem}(s|es)?\\b` : `\\b${stem}`, 'i').test(text);
+};
+export const rankSkills = (skills, query) => {
+    const words = (String(query ?? '').toLowerCase().match(/[a-z0-9]{3,}/g) || []).filter((word) => !FILLER_WORDS.has(word));
+    return skills
+        .map((skill) => ({ skill, score: words.reduce((sum, word) => sum + (wordIn(skill.name, word) ? 4 : 0) + (wordIn(skill.description, word) ? 1 : 0), 0) }))
+        .filter((hit) => hit.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5)
+        .map((hit) => hit.skill);
+};
+const findSkillTool = (others) => ({
+    fn: 'find_skill',
+    label: LIBRARY_STEP,
+    changes: false,
+    shown: (input) => clip(String(input?.query ?? ''), 80),
+    definition: {
+        type: 'function',
+        function: {
+            name: 'find_skill',
+            description: `Search the library of ${others.length} skills for one that is not turned on in this chat. A skill is a set of expert instructions for one kind of work, such as writing a cold email, reviewing a contract or planning a launch. Returns matching skills by name and description. You cannot turn a skill on yourself: when one would help, tell the user its name and that they can turn it on under Skills.`,
+            parameters: { type: 'object', properties: { query: { type: 'string', description: 'A few words for the kind of work' } }, required: ['query'] }
+        }
+    },
+    run: async (input) => {
+        const found = rankSkills(others, input?.query);
+        if (found.length === 0) return { content: 'No skill in the library matches. Answer without one.' };
+        const lines = found.map((skill) => `- ${skill.name} (${SKILL_SOURCES[skill.source]?.name || skill.source}): ${skill.description}`);
+        return { content: ['These skills are not turned on in this chat. Tell the user by name which one would help and that they can turn it on under Skills, then answer as well as you can without it.', ...lines].join('\n') };
+    }
+});
 // A skill may end with a reminder, which is put last so it is the last thing the model reads.
 const closingOf = (chat) => {
     const reminders = skillsOf(chat).map((skill) => skill.remember).filter(Boolean);
@@ -2111,7 +2149,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const searching = webSearchReady() && chat.webSearch !== false && facts.capabilities.includes('tools');
         const messages = [...prompt];
         const { listed } = sortSkills(chat, facts.capabilities.includes('tools'));
-        const chatTools = facts.capabilities.includes('tools') ? [...(listed.length > 0 ? [openSkillTool(listed)] : []), ...await toolsForChat(chat, userId)] : [];
+        const on = new Set(skillsOf(chat).map((skill) => skill.id));
+        const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
+        const chatTools = facts.capabilities.includes('tools') ? [...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...await toolsForChat(chat, userId)] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
