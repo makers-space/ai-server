@@ -14,7 +14,7 @@ import {
     OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
-    CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient,
+    CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
 } from '../middleware/ai.middleware.js';
 
@@ -77,6 +77,8 @@ const liveCatalogue = async (query, hardware) => {
     await loadLibrarySizes(shown(order()).map((entry) => entry.tag.split(':')[0]));
     const all = order();
     const entries = shown(all);
+    const online = await ollamaOnlineNames();
+    entries.forEach((entry) => { entry.online = runsOnline(entry, online); });
     entries.forEach((entry) => knownModels.set(entry.tag, entry));
     loadLibrarySizes(models.map((model) => model.name)).catch(() => {});
 

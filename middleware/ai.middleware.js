@@ -1576,6 +1576,7 @@ const realCloudFetch = (...args) => fetch(...args);
 let cloudFetch = realCloudFetch;
 export const setCloudFetch = (replacement = null) => {
     cloudFetch = replacement || realCloudFetch;
+    onlineNames = { at: 0, names: new Set() };
 };
 
 const cloudFault = (status, text = '') => {
@@ -1771,3 +1772,21 @@ export const createCloudClient = (entry, key, known = []) => {
         }
     };
 };
+
+// The models Ollama runs on its own computers. Ollama publishes the list to anyone, so it is read without a key and
+// kept for an hour. It is a small part of the library: most models can only be downloaded.
+const ONLINE_NAMES_MS = 60 * 60 * 1000;
+let onlineNames = { at: 0, names: new Set() };
+export const ollamaOnlineNames = async () => {
+    if (Date.now() - onlineNames.at < ONLINE_NAMES_MS) return onlineNames.names;
+    if (libraryFetch && cloudFetch === realCloudFetch) return new Set();
+    try {
+        const body = await (await cloudFetch('https://ollama.com/api/tags', { signal: AbortSignal.timeout(8000) })).json();
+        onlineNames = { at: Date.now(), names: new Set((body.models || []).map((model) => model.name)) };
+    } catch {
+        onlineNames = { at: Date.now() - ONLINE_NAMES_MS + 5 * 60 * 1000, names: onlineNames.names };
+    }
+    return onlineNames.names;
+};
+// A library entry runs online when Ollama lists that exact size, or, for a model with no sizes to download, its name.
+export const runsOnline = (entry, names) => names.has(entry.tag) || (Boolean(entry.cloudOnly) && [...names].some((name) => name.split(':')[0] === entry.tag));
