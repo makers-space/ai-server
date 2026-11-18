@@ -250,6 +250,9 @@ const STATUS_TIMEOUT_MS = 3000;
 
 const defaultFactory = (host, fetchThrough = null) => new Ollama(fetchThrough ? { host, fetch: fetchThrough } : { host });
 let clientFactory = defaultFactory;
+// Ollama answers a chat only once the model is in memory, and a request that has not been answered yet can only be
+// ended through its own signal. A signal given with a chat is joined to that request, so Stop works while a model loads.
+const stoppable = (through, signal) => (input, init = {}) => through(input, { ...init, signal: init.signal ? AbortSignal.any([init.signal, signal]) : signal });
 
 export const setOllamaClientFactory = (factory) => {
     clientFactory = factory;
@@ -268,10 +271,14 @@ const withTimeout = (promise, ms) => {
 };
 
 export const createOllamaClient = (host, fetchThrough = null) => {
-    const make = () => (fetchThrough ? defaultFactory(host, fetchThrough) : clientFactory(host));
-    const call = async (run) => {
+    const make = (signal) => {
+        if (!signal) return fetchThrough ? defaultFactory(host, fetchThrough) : clientFactory(host);
+        if (!fetchThrough && clientFactory !== defaultFactory) return clientFactory(host, signal);
+        return defaultFactory(host, stoppable(fetchThrough || fetch, signal));
+    };
+    const call = async (run, signal) => {
         try {
-            return await run(make());
+            return await run(make(signal));
         } catch (error) {
             throw mapOllamaError(error);
         }
@@ -295,7 +302,7 @@ export const createOllamaClient = (host, fetchThrough = null) => {
         remove: (model) => call((client) => client.delete({ model })),
         create: (request) => call((client) => client.create(request)),
         pull: (model) => call((client) => client.pull({ model, stream: true })),
-        chat: (request) => call((client) => client.chat(request)),
+        chat: (request, signal) => call((client) => client.chat(request), signal),
         unload: (model) => call((client) => client.generate({ model, prompt: '', keep_alive: 0 })),
         load: (model, keepAlive, numCtx) => call((client) => client.generate({ model, prompt: '', keep_alive: keepAlive, options: { num_ctx: numCtx } }))
     };
@@ -1893,10 +1900,10 @@ export const createCloudClient = (entry, key, known = []) => {
     }
 
     if (entry.type === 'ollama') {
-        const raw = () => new Ollama({ host: entry.base, fetch: cloudFetch, headers: { Authorization: `Bearer ${key}` } });
-        const call = async (run) => {
+        const raw = (signal) => new Ollama({ host: entry.base, fetch: signal ? stoppable(cloudFetch, signal) : cloudFetch, headers: { Authorization: `Bearer ${key}` } });
+        const call = async (run, signal) => {
             try {
-                return await run(raw());
+                return await run(raw(signal));
             } catch (error) {
                 if (error instanceof OllamaError || error?.name === 'AbortError') throw error;
                 throw new OllamaError(error?.status_code ? cloudFault(error.status_code, String(error.message || '')) : 'PROVIDER_DOWN', String(error?.message || '').slice(0, 300));
@@ -1908,7 +1915,7 @@ export const createCloudClient = (entry, key, known = []) => {
                 const { models = [] } = await call((client) => client.list());
                 return { models: models.filter((model) => !(model.capabilities || []).includes('embedding')).map((model) => ({ ...model, cloud: { contextLength: null, vision: (model.capabilities || []).includes('vision') } })) };
             },
-            chat: (request) => call((client) => client.chat({ model: request.model, messages: request.messages, stream: request.stream, ...(request.tools ? { tools: request.tools } : {}), ...(request.think === undefined ? {} : { think: request.think }) }))
+            chat: (request, signal) => call((client) => client.chat({ model: request.model, messages: request.messages, stream: request.stream, ...(request.tools ? { tools: request.tools } : {}), ...(request.think === undefined ? {} : { think: request.think }) }), signal)
         };
     }
 
@@ -1930,8 +1937,10 @@ export const createCloudClient = (entry, key, known = []) => {
                 }))
             };
         },
-        chat: async (request) => {
+        chat: async (request, signal) => {
             const controller = new AbortController();
+            if (signal?.aborted) controller.abort();
+            signal?.addEventListener('abort', () => controller.abort(), { once: true });
             const started = Date.now();
             const options = request.options || {};
             const body = {

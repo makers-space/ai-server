@@ -2040,6 +2040,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
     });
     let stream = null;
     let job = null;
+    // Ends a request the model has not started answering, which is the whole time a model is loading into memory.
+    const halt = new AbortController();
     const write = (event) => {
         const last = live.events[live.events.length - 1];
         if ((event.type === 'token' || event.type === 'thinking') && last?.type === event.type) last.text += event.text;
@@ -2057,6 +2059,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
     live.stop = () => {
         gone = true;
         job?.cancel();
+        halt.abort();
         stream?.abort?.();
         onStop();
     };
@@ -2100,7 +2103,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
 
                 const calls = [];
                 let said = '';
-                stream = await ollama.chat(request);
+                stream = await ollama.chat(request, halt.signal);
                 if (gone) stream.abort?.();
                 for await (const part of stream) {
                     if (part.message?.thinking) {

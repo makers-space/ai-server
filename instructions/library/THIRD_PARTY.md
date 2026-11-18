@@ -8,61 +8,61 @@ What Mollama changes: the header of each file is rewritten to a short form (name
 
 https://github.com/anthropics/skills
 
-18 skills, in `library/anthropic`. Licence: Apache License 2.0. Written by Anthropic.
+18 skills, in `anthropic`. Licence: Apache License 2.0. Written by Anthropic.
 
 ## mattpocock/skills
 
 https://github.com/mattpocock/skills
 
-39 skills, in `library/engineering`. Licence: MIT. Copyright (c) 2026 Matt Pocock.
+39 skills, in `engineering`. Licence: MIT. Copyright (c) 2026 Matt Pocock.
 
 ## coreyhaines31/marketingskills
 
 https://github.com/coreyhaines31/marketingskills
 
-53 skills, in `library/marketing`. Licence: MIT. Copyright (c) 2025 Corey Haines.
+53 skills, in `marketing`. Licence: MIT. Copyright (c) 2025 Corey Haines.
 
 ## Open-Medica/open-medical-skills
 
 https://github.com/Open-Medica/open-medical-skills
 
-49 skills, in `library/medical`. Licence: MIT. Copyright (c) 2026 IntelMedica.ai.
+49 skills, in `medical`. Licence: MIT. Copyright (c) 2026 IntelMedica.ai.
 
 ## davekilleen/dex
 
 https://github.com/davekilleen/dex
 
-112 skills, in `library/dex`. Licence: MIT. Copyright (c) 2026 Dave Killeen.
+112 skills, in `dex`. Licence: MIT. Copyright (c) 2026 Dave Killeen.
 
 ## upstash/context7
 
 https://github.com/upstash/context7
 
-3 skills, in `library/context7`. Licence: MIT. Copyright (c) 2021 Upstash, Inc..
+3 skills, in `context7`. Licence: MIT. Copyright (c) 2021 Upstash, Inc..
 
 ## mvanhorn/last30days-skill
 
 https://github.com/mvanhorn/last30days-skill
 
-1 skills, in `library/last30days`. Licence: MIT. Copyright (c) 2026 Matt Van Horn.
+1 skills, in `last30days`. Licence: MIT. Copyright (c) 2026 Matt Van Horn.
 
 ## wheresryan22/anatomy
 
 https://github.com/wheresryan22/anatomy
 
-1 skills, in `library/anatomy`. Licence: MIT. Copyright (c) 2026 Ryan.
+1 skills, in `anatomy`. Licence: MIT. Copyright (c) 2026 Ryan.
 
 ## lucasmarkes/hairline
 
 https://github.com/lucasmarkes/hairline
 
-2 skills, in `library/hairline`. Licence: MIT. Copyright (c) 2026 Lucas Marques.
+2 skills, in `hairline`. Licence: MIT. Copyright (c) 2026 Lucas Marques.
 
 ## ItzCrazyKns/Perplexica and miurla/morphic
 
 https://github.com/ItzCrazyKns/Perplexica (MIT, Copyright (c) 2026 ItzCrazyKns) and https://github.com/miurla/morphic (Apache License 2.0)
 
-1 skill, in `library/search`: Web Search. Unlike the other skills it is not a copy. It is written for Mollama's two search tools and follows two published prompts: when to search and how to make a search stand on its own follow Perplexica's search classifier; how to answer from results follows Morphic's quick search mode, without its fixed headings, its citation on every sentence and its closing summary.
+1 skill, in `search`: Web Search. Unlike the other skills it is not a copy. It is written for Mollama's two search tools and follows two published prompts: when to search and how to make a search stand on its own follow Perplexica's search classifier; how to answer from results follows Morphic's quick search mode, without its fixed headings, its citation on every sentence and its closing summary.
 
 ## MIT License
 
