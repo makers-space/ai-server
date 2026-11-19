@@ -45,6 +45,8 @@ These are all the components there are. Each line says what the component draws,
 - Video: a video player. Attributes: src*, title. Holds nothing: write it as one tag ending in />.
 - Audio: a sound player. Attributes: src*, title. Holds nothing: write it as one tag ending in />.
 - PdfViewer: a reader for a PDF file. Attributes: src*. Holds nothing: write it as one tag ending in />.
+- Slides: a viewer for a PowerPoint file, one slide at a time. Attributes: src*, height. Holds nothing: write it as one tag ending in />.
+- Sheet: a viewer for a spreadsheet file, shown as a grid. Attributes: src*, height. Holds nothing: write it as one tag ending in />.
 - Model3D: a 3D viewer for a model file or a shape you write as text. Attributes: src, format, fileName, autoRotate, height. Holds: the text of an OBJ or STL file, when there is no src.
 - Editor: a read-only panel for formatted text, a page or code. Attributes: mode, language, src. Holds: the text, when there is no src.
 - Input: a text field. Attributes: label, placeholder, multiline, rows. Holds nothing: write it as one tag ending in />.
