@@ -1657,6 +1657,38 @@ const skillNeeds = (body) => {
         /\b(references?|resources?|assets|templates?|examples?|rules|docs)\/[\w./-]+\.\w+|\]\((?!https?:|#)[^)]+\.(md|txt|json|ya?ml|py|sh|js|ts)\)/i.test(text) && 'files'
     ].filter(Boolean);
 };
+// What a person needs on their own computer to run a skill's commands themselves, without any service of Mollama's:
+// where the skill comes from, the line its author gives for installing it, the programs its commands call and the
+// Python libraries it installs. All of it is read from the skill's own page.
+const SETUP_PROGRAMS = [
+    ['python', /(?:^|[\s$`(])(?:python3?|pip3?)\s/m, false],
+    ['node', /(?:^|[\s$`(])(?:node|npm|npx)\s/m, false],
+    ['uv', /(?:^|[\s$`(])uvx?\s/m, false],
+    ['docker', /(?:^|[\s$`(])docker\s/m, false],
+    ['brew', /(?:^|[\s$`(])brew\s/m, false],
+    ['git', /(?:^|[\s$`(])git\s+(?:clone|pull)\b/m, false],
+    ['libreoffice', /\bsoffice\b|libreoffice/i, true],
+    ['poppler', /\bpdftoppm\b|\bpdftotext\b|\bpoppler\b/i, true],
+    // A shell block counts only when it holds a command, not when all it held was the line that installs the skill.
+    ['shell', /```(?:bash|sh|shell|zsh)\n(?:[ \t]*(?:#[^\n]*)?\n)*[ \t]*[^\s#`]/i, true]
+];
+const INSTALL_COMMAND = /(?:npx (?:-y )?skills add|git clone \S+ && cp -r|\/plugin (?:marketplace add|install))[^`\n]*/gi;
+const skillSetup = (skill) => {
+    const whole = String(skill.text || '');
+    const install = [...new Set((whole.match(INSTALL_COMMAND) || []).map((line) => line.trim().replace(/[.,;:)]+$/, '')))];
+    // The line that installs a skill is not one of its commands, so it is set aside before they are read.
+    const body = whole.replace(new RegExp(INSTALL_LINE.source, 'gim'), '');
+    const code = [...[...body.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((match) => match[1]), ...[...body.replace(/```[\s\S]*?```/g, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1])].join('\n');
+    const libraries = [...code.matchAll(/\bpip3? install ([^\n|&;#]+)/g)].flatMap((match) => match[1].trim().split(/\s+/)).filter((word) => /^[A-Za-z][\w.-]*(?:\[[\w,-]+\])?(?:[=<>~!]=?[\w.*]+)?$/.test(word));
+    return {
+        repos: skill.source === 'mine' ? [] : String(SKILL_SOURCES[skill.source]?.repo || '').split(',').map((repo) => repo.trim()).filter(Boolean),
+        address: skill.source === 'mine' ? skill.credit : null,
+        install,
+        runs: skillNeeds(whole).includes('commands'),
+        programs: [...new Set([...SETUP_PROGRAMS.filter(([, test, anywhere]) => test.test(anywhere ? body : code)).map(([id]) => id), ...(install.some((line) => line.startsWith('npx')) ? ['node'] : []), ...(install.some((line) => line.startsWith('git')) ? ['git'] : [])])],
+        libraries: [...new Set(libraries)].slice(0, 40)
+    };
+};
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
     const head = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -2279,7 +2311,7 @@ export const listSkills = asyncHandler(async (req, res) => {
 export const readSkill = asyncHandler(async (req, res) => {
     const skill = [...SKILLS, ...await ownSkillsOf(req.user.id)].find((one) => one.id === req.params.id);
     if (!skill) return res.status(404).json({ success: false, message: 'Skill not found' });
-    return res.status(200).json({ success: true, skill: { ...presentSkill(skill), text: skill.text } });
+    return res.status(200).json({ success: true, skill: { ...presentSkill(skill), text: skill.text, setup: skillSetup(skill) } });
 });
 
 // One of a skill's own files, for the page that shows what a model built with them.
