@@ -1476,6 +1476,8 @@ const MAX_CHAT_ATTACHMENT_CHARS = 2000000;
 const AUTO_CONTEXT_LIMIT = 32768;
 const CONTEXT_STEPS = [8192, 16384, AUTO_CONTEXT_LIMIT];
 const REPLY_RESERVE = 1024;
+// A model that thinks before it answers spends room on the thinking too, often several thousand tokens of it.
+const THINK_RESERVE = 6144;
 const CONTEXT_WARN_PERCENT = 75;
 
 export const queue = new GenerationQueue();
@@ -2371,7 +2373,11 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
             reply.content += text;
             write({ type: 'token', text });
         };
-        const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
+        const thinkRoom = facts.capabilities.includes('thinking') ? THINK_RESERVE : 0;
+        const numCtx = sizeFor(messages, thinkRoom + listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
+        // The room a model is given grows with what the reply has gathered: a skill it opened, a file it read.
+        let room = numCtx;
+        let grew = false;
         let corrected = false;
         let correcting = false;
         let firstTry = null;
@@ -2387,14 +2393,16 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     model: chat.model,
                     messages,
                     stream: true,
-                    options: { num_predict: numCtx, ...(chat.options || {}), num_ctx: numCtx },
+                    options: { num_predict: room, ...(chat.options || {}), num_ctx: room },
                     keep_alive: `${settings.keepAliveMinutes}m`
                 };
                 if (facts.capabilities.includes('thinking')) request.think = true;
                 if ((searching || chatTools.length > 0) && round < MAX_TOOL_ROUNDS) request.tools = [...(searching ? SEARCH_TOOLS : []), ...chatTools.map((tool) => tool.definition)];
 
+                room = Math.max(room, sizeFor(messages, thinkRoom));
                 const calls = [];
                 let said = '';
+                let endedBy = null;
                 stream = await ollama.chat(request, halt.signal);
                 if (gone) stream.abort?.();
                 for await (const part of stream) {
@@ -2416,6 +2424,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     }
                     if (Array.isArray(part.message?.tool_calls)) calls.push(...part.message.tool_calls);
                     if (part.done) {
+                        endedBy = part.done_reason || null;
                         evalCount += part.eval_count || 0;
                         evalSeconds += (part.eval_duration || 0) / 1e9;
                         totalMs += part.total_duration ? part.total_duration / 1e6 : 0;
@@ -2432,6 +2441,22 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         write({ type: 'replace', text: reply.content });
                         said = written.text;
                     }
+                }
+                // A reply that stopped because the model ran out of room is tried once more with more room when there is
+                // more to give. When there is not, the person is told it is incomplete instead of being left with nothing.
+                if (endedBy === 'length' && calls.length === 0 && !gone) {
+                    const more = !grew && !(Number(chat.options?.num_ctx) > 0) ? (CONTEXT_STEPS.find((step) => step > room && step <= capacity) || (capacity > room ? capacity : null)) : null;
+                    if (more) {
+                        grew = true;
+                        room = more;
+                        reply.content = reply.content.slice(0, reply.content.length - said.length);
+                        write({ type: 'replace', text: reply.content });
+                        write({ type: 'note', text: 'Giving the model more room and trying again…' });
+                        correcting = true;
+                        continue;
+                    }
+                    reply.errorCode = 'REPLY_CUT';
+                    break;
                 }
                 // What the model drew is checked once, and it is given one chance to put right what cannot be drawn.
                 if (calls.length === 0 && !gone && !corrected && draws && round < MAX_TOOL_ROUNDS) {

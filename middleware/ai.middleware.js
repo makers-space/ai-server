@@ -53,6 +53,11 @@ const ERROR_TABLE = {
         message: 'This model cannot use tools.',
         action: 'Pick a model that supports tools.'
     },
+    REPLY_CUT: {
+        status: 422,
+        message: 'The model ran out of room before it finished, so this reply is incomplete.',
+        action: 'Ask again in a new chat, turn off a long skill, or pick a model that can read more.'
+    },
     TOO_LONG: {
         status: 422,
         message: 'The conversation is too long for this model.',
@@ -1720,6 +1725,7 @@ async function* sharedParts(response, started) {
     const decoder = new TextDecoder();
     const calls = new Map();
     let usage = null;
+    let finish = null;
     let held = '';
     for await (const chunk of response.body) {
         held += decoder.decode(chunk, { stream: true });
@@ -1736,6 +1742,7 @@ async function* sharedParts(response, started) {
             }
             if (event.error) throw new OllamaError(cloudFault(Number(event.error.code) || 500, JSON.stringify(event.error)), String(event.error.message || '').slice(0, 300));
             if (event.usage) usage = event.usage;
+            if (event.choices?.[0]?.finish_reason) finish = event.choices[0].finish_reason;
             const delta = event.choices?.[0]?.delta;
             if (!delta) continue;
             const thinking = thoughtOf(delta);
@@ -1760,7 +1767,7 @@ async function* sharedParts(response, started) {
             return { function: { name: call.name, arguments: input } };
         }) } };
     }
-    yield { done: true, eval_count: usage?.completion_tokens || 0, prompt_eval_count: usage?.prompt_tokens || 0, total_duration: (Date.now() - started) * 1e6 };
+    yield { done: true, done_reason: finish === 'length' ? 'length' : 'stop', eval_count: usage?.completion_tokens || 0, prompt_eval_count: usage?.prompt_tokens || 0, total_duration: (Date.now() - started) * 1e6 };
 }
 
 // Claude is reached through Anthropic's own library and its own request shape, not the shared one.
@@ -1829,7 +1836,7 @@ async function* claudeParts(stream, started) {
         const calls = final.content.filter((block) => block.type === 'tool_use');
         if (calls.length > 0) yield { message: { tool_calls: calls.map((block) => ({ function: { name: block.name, arguments: block.input || {} } })) } };
         const usage = final.usage || {};
-        yield { done: true, eval_count: usage.output_tokens || 0, prompt_eval_count: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), total_duration: (Date.now() - started) * 1e6 };
+        yield { done: true, done_reason: final.stop_reason === 'max_tokens' ? 'length' : 'stop', eval_count: usage.output_tokens || 0, prompt_eval_count: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), total_duration: (Date.now() - started) * 1e6 };
     } catch (error) {
         if (error?.name === 'AbortError' || error instanceof Anthropic.APIUserAbortError) throw error;
         throw claudeFault(error);
