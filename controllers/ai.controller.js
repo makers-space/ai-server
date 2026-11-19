@@ -2048,7 +2048,7 @@ const SKILL_FUNCTIONS = {
         doing: 'Building the figure…',
         description: 'Does what `node build.mjs <name>.js` and `node validate.mjs` do in the Hairline skill, without Node: makes the checks validate.mjs makes on your figure and returns what it would print, then puts the figure on the bench (bench.html with kernel.js and the figure in their two slots, nothing else changed) and shows the finished page to the user in the chat. Give the whole figure file. When it returns things to fix, fix them in the figure and call it again. Use this instead of asking the user to run anything. The look (look.mjs) needs a browser, which you do not have here: when you are done, say in one sentence that you have not seen the figure drawn.',
         parameters: { type: 'object', properties: { code: { type: 'string', description: 'The whole figure file as you would save it in <name>.js, ending with its hairline({ ... }) call' } }, required: ['code'] },
-        run: (input, { show, kept }) => {
+        run: async (input, { show, kept }) => {
             const code = String(input?.code ?? '').replace(/\r\n/g, '\n').trim();
             const call = [...code.matchAll(/\bhairline\s*\(\s*\{/g)].at(-1);
             if (!call) return { content: 'Nothing was built. A figure file ends with hairline({ name, means, rules, range, tour, mount }).', failed: 'failed' };
@@ -2056,7 +2056,7 @@ const SKILL_FUNCTIONS = {
             const name = /\bname:\s*["'`]([a-z][a-z0-9-]*)["'`]/.exec(code.slice(call.index))?.[1] || 'figure';
             // A figure with something to fix is sent back once before it is shown, as the skill has it fixed before the
             // look. A second build is shown whatever is left, so the person is never left with nothing.
-            const faults = hairlineFaults(code);
+            const faults = await hairlineChecks(code);
             const before = kept?.get('hairline_build') || 0;
             kept?.set('hairline_build', before + 1);
             const block = ['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}" palette="ground:background, ink:text, muted:text 65%, line:border, hairline-plate:background, hairline-hi:text, hairline-edge:text 55%, hairline-mid:text 32%, hairline-lo:border">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n');
@@ -2072,6 +2072,29 @@ const SKILL_FUNCTIONS = {
         }
     }]
 };
+// What the Hairline kit's own validate.mjs says of a figure. With the skill runner set up, the kit's two commands are
+// run there as the skill writes them: build.mjs puts the figure on the bench and validate.mjs checks that page. The
+// runner is given a short while to answer, since a figure should not wait on a service that is waking up; when it is
+// not set up, does not answer in time or fails, the checks kept here (hairlineFaults) are made instead.
+const HAIRLINE_WAIT = 20000;
+const hairlineChecks = async (code) => {
+    if (!skillRunnerReady()) return hairlineFaults(code);
+    try {
+        const figure = { path: 'figure.js', data: Buffer.from(`${code}\n`).toString('base64') };
+        const built = await runSkillScript({ skill: 'hairline-create', script: 'build.mjs', args: ['figure.js', 'page.html'], files: [figure] }, HAIRLINE_WAIT);
+        const page = (built.files || []).find((file) => file.path === 'page.html');
+        if (built.exitCode !== 0 || !page) return hairlineFaults(code);
+        const checked = await runSkillScript({ skill: 'hairline-create', script: 'validate.mjs', args: ['page.html'], files: [page] }, HAIRLINE_WAIT);
+        if (checked.timedOut || ![0, 1].includes(checked.exitCode)) return hairlineFaults(code);
+        // It prints one line for each thing to fix and then a count, as errors, or a single line starting "ok".
+        if (checked.exitCode === 0) return [];
+        const said = `${checked.stderr || ''}\n${checked.stdout || ''}`.split('\n').map((line) => line.trim()).filter((line) => line && !/^\d+ to fix in /.test(line));
+        return said.length > 0 ? said : hairlineFaults(code);
+    } catch {
+        return hairlineFaults(code);
+    }
+};
+
 // The office skills' own scripts run on the skill runner, on files from the person's FilesystemOne, and what a script
 // makes is saved back there. Only a script that ships with the skill is run, never code a model writes, so these
 // skills still say "Guidance only": the parts that have the model write its own program are not done here.

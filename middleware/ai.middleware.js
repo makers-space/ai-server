@@ -925,7 +925,7 @@ export const setRunnerFetch = (replacement) => {
     runnerFetch = replacement || realFetch;
 };
 export const skillRunnerReady = () => Boolean(process.env.SKILL_RUNNER_URL && process.env.SKILL_RUNNER_SECRET);
-export const runSkillScript = async (job) => {
+export const runSkillScript = async (job, wait = 360000) => {
     const raw = JSON.stringify(job);
     const stamp = String(Date.now());
     const signature = crypto.createHmac('sha256', process.env.SKILL_RUNNER_SECRET).update(`${stamp}.${raw}`).digest('hex');
@@ -935,7 +935,7 @@ export const runSkillScript = async (job) => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Runner-Timestamp': stamp, 'X-Runner-Signature': signature },
             body: raw,
-            signal: AbortSignal.timeout(360000)
+            signal: AbortSignal.timeout(wait)
         });
     } catch {
         throw new Error('The skill runner could not be reached. It may be waking up; try again in a minute.');
