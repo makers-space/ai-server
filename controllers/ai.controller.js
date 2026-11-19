@@ -1857,6 +1857,42 @@ const COMPONENT_RULES = (() => {
     }
     return tags;
 })();
+// Which values an attribute takes is read from the tables on each component's page: a cell that is a plain list of
+// words is the whole set of values, and one that asks for a number takes only a number. Anything a page describes in
+// words (text, an address, a length) is left alone, and so is a list the page says is open to other names.
+const COMPONENT_VALUES = (() => {
+    const word = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+    const tags = {};
+    for (const page of COMPONENT_PAGES) {
+        let tag = page.name;
+        let reading = false;
+        for (const line of page.text.split('\n')) {
+            if (/^#+\s/.test(line)) {
+                const inner = line.match(/^###\s+([A-Z][A-Za-z0-9]*):/);
+                tag = inner ? inner[1] : /^###/.test(line) ? null : tag;
+                reading = false;
+                continue;
+            }
+            if (!line.startsWith('|')) {
+                reading = false;
+                continue;
+            }
+            const cells = line.split('|').slice(1, -1).map((cell) => cell.trim());
+            if (cells[0] === 'Attribute' && cells[1] === 'Values') {
+                reading = true;
+                continue;
+            }
+            if (!reading || !tag || /^-+$/.test(cells[0]) || /\bany other\b/i.test(cells[2] || '')) continue;
+            const listed = cells[1].replace(/\([^)]*\)/g, '').split(',').map((one) => one.trim().replace(/ \d+(px)?$/, ''));
+            const rule = listed.length >= 2 && listed.every((one) => word.test(one)) ? { values: listed }
+                : /^(a number|numbers? of pixels)/.test(cells[1]) ? { number: true } : null;
+            if (!rule) continue;
+            tags[tag] = tags[tag] || {};
+            for (const attribute of cells[0].split(',').map((one) => one.trim())) tags[tag][attribute] = tags[tag][attribute] || rule;
+        }
+    }
+    return tags;
+})();
 const WHOLE_TEXT_TAGS = ['Frame', 'Editor', 'Image', 'Model3D'];
 const FILE_TAGS = ['Video', 'Audio', 'PdfViewer', 'Model3D', 'Editor', 'Data', 'Image'];
 const TOP_COMPONENTS = COMPONENT_PAGES.map((page) => page.name);
@@ -1872,6 +1908,7 @@ const componentBlocks = (text) => {
 };
 export const componentFaults = (text) => {
     const faults = [];
+    const wrongValues = new Set();
     const used = new Set();
     const known = Object.keys(COMPONENT_RULES);
     const exact = new Map(known.map((name) => [name.toLowerCase(), name]));
@@ -1894,16 +1931,29 @@ export const componentFaults = (text) => {
             for (const need of COMPONENT_RULES[name]) {
                 if (!attributes.has(need) || attributes.get(need) === '') faults.push(`${name} needs the attribute "${need}".`);
             }
+            for (const [attribute, value] of attributes) {
+                const rule = COMPONENT_VALUES[name]?.[attribute];
+                if (!rule || typeof value !== 'string' || value.trim() === '') continue;
+                const wrong = rule.values && !rule.values.includes(value.trim()) ? `${name}: ${attribute}="${clip(value, 30)}" is not a value it takes. ${attribute} takes: ${rule.values.join(', ')}.`
+                    : rule.number && !Number.isFinite(Number(value)) ? `${name}: ${attribute}="${clip(value, 30)}" must be a number with no unit.` : null;
+                if (!wrong) continue;
+                faults.push(wrong);
+                wrongValues.add(wrong);
+            }
             const address = attributes.get('src');
             if (FILE_TAGS.includes(name) && typeof address === 'string' && address && !/^https:\/\//i.test(address)) faults.push(`${name}: src must be a full https address of a real file, not "${clip(address, 60)}". Do not make an address up.`);
         }
     }
-    return { faults: [...new Set(faults)].slice(0, 8), used: [...used] };
+    const kept = [...new Set(faults)].slice(0, 8);
+    // When every fault is a wrong value, the fault itself says which values there are, and that is all the model needs.
+    return { faults: kept, used: [...used], valuesOnly: kept.length > 0 && kept.every((fault) => wrongValues.has(fault)) };
 };
 const CHECK_STEP = 'Drawing check';
 // The pages sent with a correction are kept to a size a small model still has room for.
 const CORRECTION_PAGE_CHARS = 9000;
-const correctionFor = ({ faults, used }) => {
+const correctionFor = ({ faults, used, valuesOnly }) => {
+    // A small model handed a whole page for one wrong word tends to copy the page's example in place of its own work.
+    if (valuesOnly) return ['The chat could not draw part of your reply as you meant it:', ...faults.map((fault) => `- ${fault}`), '\nWrite your whole reply again with only this put right, keeping everything else as you wrote it. Do not mention this correction.'].join('\n');
     const pages = [];
     let size = 0;
     for (const page of COMPONENT_PAGES.filter((one) => used.includes(one.name)).sort((a, b) => a.text.length - b.text.length)) {
