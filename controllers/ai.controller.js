@@ -2083,7 +2083,7 @@ const runnerFunction = (kind) => ({
     label: `${kind} script`,
     doing: 'Running the script…',
     changes: true,
-    description: `Runs one of the ${kind} skill's own scripts, as the skill writes it (\`python scripts/...\`), on files from the user's FilesystemOne. Give the script's path inside the skill, its arguments, and the FilesystemOne path of every file it works on: each is put in an empty folder under its own file name, so name it that way in the arguments. Files the script makes or changes are saved to save_to, or beside the first file. Only the skill's own Python scripts run; a script that needs LibreOffice or poppler fails and says so, and a program you write yourself cannot be run here.`,
+    description: `Runs one of the ${kind} skill's own scripts, as the skill writes it (\`python scripts/...\` or \`node scripts/...\`), on files from the user's FilesystemOne. Give the script's path inside the skill, its arguments, and the FilesystemOne path of every file it works on: each is put in an empty folder under its own file name, so name it that way in the arguments. Files the script makes or changes are saved to save_to, or beside the first file. Only the skill's own scripts run; a script that needs LibreOffice or poppler fails and says so, and a program you write yourself cannot be run here.`,
     parameters: {
         type: 'object',
         properties: {
@@ -2095,7 +2095,7 @@ const runnerFunction = (kind) => ({
         required: ['script']
     },
     run: async (input) => {
-        const script = String(input?.script || '').trim().replace(/^python3?\s+/, '');
+        const script = String(input?.script || '').trim().replace(/^(?:python3?|node)\s+/, '');
         const args = Array.isArray(input?.args) ? input.args.map(String) : [];
         const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
         const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
