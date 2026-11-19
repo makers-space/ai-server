@@ -1624,7 +1624,8 @@ export const SKILL_SOURCES = {
     search: { name: 'Web search (Perplexica, Morphic)', repo: 'ItzCrazyKns/Perplexica, miurla/morphic' },
     last30days: { name: 'Last 30 days', repo: 'mvanhorn/last30days-skill' },
     anatomy: { name: 'Anatomy', repo: 'wheresryan22/anatomy' },
-    hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' }
+    hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' },
+    taste: { name: 'Taste (Leonxlnx)', repo: 'Leonxlnx/taste-skill' }
 };
 const LIBRARY = path.join(INSTRUCTIONS, 'library');
 // A skill may come with files of its own: the reference pages, examples and code its instructions name. They sit in a
