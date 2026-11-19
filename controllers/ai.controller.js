@@ -2098,11 +2098,11 @@ const hairlineChecks = async (code) => {
 // The office skills' own scripts run on the skill runner, on files from the person's FilesystemOne, and what a script
 // makes is saved back there. Only a script that ships with the skill is run, never code a model writes, so these
 // skills still say "Guidance only": the parts that have the model write its own program are not done here.
-const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf' };
+const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'marketing-conversion-tracking': 'conversion-tracking' };
 // Whose files a reply may reach: the sign-in of the person who sent the message.
 const filesScope = new AsyncLocalStorage();
 const runnerFunction = (kind) => ({
-    name: `${kind}_script`,
+    name: `${kind.replace(/-/g, '_')}_script`,
     label: `${kind} script`,
     doing: 'Running the script…',
     changes: true,
