@@ -189,6 +189,12 @@ export const modelSchemas = {
         purpose: Joi.string().valid('chat', 'writing', 'code', 'reasoning'),
         can: Joi.string().pattern(/^(tools|vision|thinking)(,(tools|vision|thinking))*$/),
         fits: Joi.boolean(),
+        minSizeMb: megabytes,
+        maxSizeMb: megabytes,
+        minMemoryMb: megabytes,
+        maxMemoryMb: megabytes,
+        minParams: Joi.number().min(0).max(5000),
+        maxParams: Joi.number().min(0).max(5000),
         all: Joi.boolean(),
         sample: Joi.boolean(),
         shared: Joi.boolean()

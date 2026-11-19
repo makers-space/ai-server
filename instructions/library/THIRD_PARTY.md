@@ -60,6 +60,8 @@ https://github.com/lucasmarkes/hairline
 
 The Hairline Create skill also comes with the files its instructions name, in `hairline/hairline-hairline-create`, copied unchanged from `skills/hairline-create` at commit 034f4bf9902c: its engine (`kernel.js`), its page (`bench.html`), its rules, concepts, source and look pages, its two examples and its build, look, read and validate scripts. Mollama serves the text files to a model and to the page that shows a figure, and runs none of the scripts.
 
+The checks of its `validate.mjs` are also reproduced word for word in `server/controllers/ai.controller.js` (`hairlineFaults`), so the Hairline build function can make them without running a script.
+
 ## ItzCrazyKns/Perplexica and miurla/morphic
 
 https://github.com/ItzCrazyKns/Perplexica (MIT, Copyright (c) 2026 ItzCrazyKns) and https://github.com/miurla/morphic (Apache License 2.0)

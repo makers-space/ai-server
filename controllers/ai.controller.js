@@ -11,7 +11,7 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, UNREADABLE_CALL, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
+    OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
@@ -77,6 +77,16 @@ const liveCatalogue = async (query, hardware) => {
     const purpose = query?.purpose || null;
     const can = String(query?.can || '').split(',').filter(Boolean);
     const fitting = Boolean(hardware) && (query?.fits === true || query?.fits === 'true');
+    // Ranges: the size of the download, the memory the model needs to run, and its size in billions of parameters.
+    const span = (low, high) => (query?.[low] === undefined && query?.[high] === undefined ? null : [Number(query?.[low]) || 0, query?.[high] === undefined ? Infinity : Number(query[high])]);
+    const ranges = { size: span('minSizeMb', 'maxSizeMb'), memory: span('minMemoryMb', 'maxMemoryMb'), params: span('minParams', 'maxParams') };
+    const ranged = Object.values(ranges).some(Boolean);
+    const between = ([low, high], value) => value >= low && value <= high;
+    // A model that runs only on Ollama's servers has no size here, so a range leaves it out.
+    const inRange = (entry) => !ranged || (!entry.cloudOnly
+        && (!ranges.size || between(ranges.size, entry.sizeMb))
+        && (!ranges.memory || between(ranges.memory, entry.fit?.memoryNeededMb || memoryNeededMb(entry)))
+        && (!ranges.params || between(ranges.params, entry.parameters)));
     const page = Number(query?.page) || 1;
     const size = Number(query?.size) || CATALOGUE_PAGE;
     // How the list under the recommendations is ordered; the recommendations themselves always come first.
@@ -111,7 +121,7 @@ const liveCatalogue = async (query, hardware) => {
         const all = hardware
             ? [...rankCatalogue(entries.filter(isPopular), hardware), ...entries.filter((entry) => !isPopular(entry)).map((entry) => ({ ...entry, fit: entry.cloudOnly ? CLOUD_FIT : fitModel(entry, hardware), pick: null }))]
             : entries.map((entry) => ({ ...entry, fit: null, pick: null }));
-        return all.filter((entry) => !fitting || entry.fit.fits).sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
+        return all.filter((entry) => (!fitting || entry.fit.fits) && inRange(entry)).sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
             || (chosenOrder ? chosenOrder(a, b) || a.parameters - b.parameters : 0)
             || (terms.length > 0 ? scoreOf(b) - scoreOf(a) : 0)
             || Number(a.cloudOnly) - Number(b.cloudOnly)
@@ -1431,7 +1441,7 @@ const SEARCH_TOOLS = [
         type: 'function',
         function: {
             name: 'web_search',
-            description: 'Search the web. Returns the title, address and text of the best matching pages.',
+            description: 'Search the web. Returns the title, address and text of the best matching pages. The user turned web search on for this chat: use it for facts, figures, sources and pictures in place of recalling them, and search again when the first results fall short.',
             parameters: { type: 'object', properties: { query: { type: 'string', description: 'What to search for' } }, required: ['query'] }
         }
     },
@@ -1702,7 +1712,7 @@ const openSkillTool = (listed) => {
             type: 'function',
             function: {
                 name: 'open_skill',
-                description: `Open one of this chat's skills and get its full instructions. Open a skill before answering when the request matches its description. The instructions are written for you and the user does not see them: do what they say in your reply, and do not repeat them back.\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n')}`,
+                description: `Open one of this chat's skills and get its full instructions. The user turned these skills on, so the list itself says what kind of help they expect: before you answer, weigh every skill on it against the request and open each one that bears on it, not only the first that fits. The instructions are written for you and the user does not see them: do what they say in your reply, and do not repeat them back.\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n')}`,
                 parameters: { type: 'object', properties: { skill: { type: 'string', enum: listed.map((skill) => skill.name), description: 'The name of the skill to open' } }, required: ['skill'] }
             }
         },
@@ -1714,6 +1724,32 @@ const openSkillTool = (listed) => {
 };
 // The files of the skills a chat has on are read one at a time, when the skill's instructions send the model to one.
 // What the person is told a model is doing while it writes a call to a tool and while that tool runs.
+// A question for the person, shown with choices they can press. Asking ends the reply: their answer is the next message.
+const ASK_STEP = 'Question';
+const askUserTool = () => ({
+    fn: 'ask_user',
+    label: ASK_STEP,
+    doing: 'Asking you a question…',
+    changes: false,
+    shown: (input) => clip(String(input?.question ?? ''), 120),
+    definition: {
+        type: 'function',
+        function: {
+            name: 'ask_user',
+            description: 'Ask the user one question and end your reply, when the request leaves open something that would change the answer and a wrong guess would waste it: which of several meanings, what it is for, how far to go. The question is shown with your choices as buttons, and their answer arrives as the next message. Do not ask what you can settle yourself, look up, or reasonably assume, and do not ask more than once in a reply.',
+            parameters: { type: 'object', properties: { question: { type: 'string', description: 'The question, in one sentence' }, choices: { type: 'array', items: { type: 'string' }, description: 'Two to four short answers the user can pick with one press' } }, required: ['question'] }
+        }
+    },
+    run: (input, { show }) => {
+        const plain = (text, most) => clip(String(text ?? '').replace(/[`<>"]/g, '').replace(/\s+/g, ' ').trim(), most);
+        const question = plain(input?.question, 300);
+        if (!question) return { content: 'Nothing was asked. Give the question.', failed: 'failed' };
+        const given = Array.isArray(input?.choices) ? input.choices : String(input?.choices ?? '').split(/\n|;|\|/);
+        const choices = [...new Set(given.map((choice) => plain(choice, 60)).filter(Boolean))].slice(0, 4);
+        show([question, ...(choices.length > 0 ? ['', '```component', '<ButtonGroup>', ...choices.map((choice) => `<Button send="${choice}" size="sm">${choice}</Button>`), '</ButtonGroup>', '```'] : [])].join('\n'));
+        return { content: 'The question is now shown to the user. Your reply ends here; their answer will be the next message.', ends: true };
+    }
+});
 const DOING = {
     web_search: 'Searching the web…',
     web_fetch: 'Reading a web page…',
@@ -1764,21 +1800,213 @@ const skillFileTool = (withFiles) => {
 // What a skill's instructions ask an agent to do with a command, Mollama does itself where it can: one function for
 // one command, offered while the skill is on, doing exactly what that command does and nothing more. No script of a
 // skill is run on the server.
+// What `node validate.mjs` checks in a Hairline figure, done here so no one has to run it. The checks between the two
+// marks are the Hairline kit's own (validate.mjs, MIT, Copyright (c) 2026 Lucas Marques), word for word. Its checks of
+// the kernel and the bench are left out, since the page is put together here, and where it runs Node to see whether
+// the figure loads, the figure is compiled here without being run.
+const hairlineFaults = (() => {
+    const LIMIT = 200;
+    /* ---- from validate.mjs ---- */
+    /**
+     * A figure's source without its comments, so its prose is never read as code.
+     * It is read the way JavaScript reads it, so a `//` inside a string, a template
+     * or a regex is not taken for a comment, and what follows it is still checked.
+     * With `words` false the strings are emptied too, for a check that must not
+     * read a string's words as code.
+     */
+    function bare(src, words = true) {
+      let out = "", i = 0, prev = "", depth = 0;
+      const open = []; // for each `${` still open, the brace depth it opened at
+      /** Reads from just past an opening quote to its close, or, in a template, to a `${`. */
+      const quoted = (q) => {
+        const from = i;
+        while (i < src.length && src[i] !== q && (q === "`" ? !(src[i] === "$" && src[i + 1] === "{") : src[i] !== "\n")) {
+          i += src[i] === "\\" ? 2 : 1;
+        }
+        if (words) out += src.slice(from, i);
+        if (q === "`" && src[i] === "$") { out += "${"; i += 2; open.push(depth++); prev = "{"; return; }
+        out += src[i] ?? ""; i++; prev = q;
+      };
+      while (i < src.length) {
+        const c = src[i], d = src[i + 1];
+        if (c === "/" && d === "/") { while (i < src.length && src[i] !== "\n") i++; }
+        else if (c === "/" && d === "*") { const end = src.indexOf("*/", i + 2); i = end < 0 ? src.length : end + 2; out += " "; }
+        else if (c === "/" && /^(?:|[(,=:[!&|?{};+\-*%<>~^])$/.test(prev)) {
+          // A regex: a slash where a value starts. A quote or a `//` inside it is the regex's own.
+          let j = i + 1, cls = false;
+          for (; j < src.length && src[j] !== "\n"; j++) {
+            if (src[j] === "\\") j++;
+            else if (src[j] === "[") cls = true;
+            else if (src[j] === "]") cls = false;
+            else if (src[j] === "/" && !cls) break;
+          }
+          out += src.slice(i, j + 1); i = j + 1; prev = ")";
+        } else if (c === '"' || c === "'" || c === "`") { out += c; i++; quoted(c); }
+        else if (c === "}" && open.length && depth - 1 === open[open.length - 1]) { depth--; open.pop(); out += c; i++; quoted("`"); }
+        else {
+          if (c === "{") depth++;
+          else if (c === "}") depth--;
+          out += c; i++;
+          if (!/\s/.test(c)) prev = c;
+        }
+      }
+      return out;
+    }
+
+    /**
+     * What a figure must not contain: a pattern read in the code with its strings,
+     * and, for an import, one read with its strings emptied, so the word in a
+     * string is not taken for the statement.
+     */
+    const BAD = [
+      ["text", /<\s*(?:text|tspan|textPath|foreignObject)\b|["'`](?:text|tspan|textPath|foreignObject)["'`]|\b(?:innerHTML|outerHTML|insertAdjacentHTML|innerText)\b/,
+        "rule 10. No words inside the figure, and no markup written as a string. Say it with geometry (a punch, a dot code, a bright edge); names go to read.textContent."],
+      ["paint", /stroke-width|strokeWidth|stroke-dasharray|-opacity|(?:fill|stroke)Opacity|["'`](?:fill|stroke|filter|style|color|stop-color|opacity)["'`]|\b(?:fill|stroke|filter|style|opacity)\s*:|\.style\b|(["'`])#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\1|\b(?:rgba?|hsla?|oklch|oklab|color-mix)\(|drop-shadow|box-shadow|feDropShadow|feGaussianBlur|[Ll]inearGradient|[Rr]adialGradient|(?:linear|radial|conic)-gradient/,
+        "rule 04. The figure sets a stroke width, colour, fill, opacity, filter, gradient or shadow of its own. Use the kernel's classes and nothing else: sil, hi, lo, nf, fo, dash, dot, dot m, dot off."],
+      ["outside", /\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|https?:\/\/|\burl\(|<\/?script|<(?:link|img|iframe|style)\b|new\s+Image\b|createElement|\beval\s*\(|new\s+Function\b|localStorage|sessionStorage|\.cookie\b/,
+        "the figure reaches outside the file or makes nodes by hand. One self-contained file: no fetch, import, URL, script tag or storage, and every node comes from HL.mk.",
+        // The keyword ends where the binding starts, so `important` or `imported` is a name, not an import.
+        // `import.meta` is left alone on purpose: by itself it reaches nothing outside the file.
+        /\bimport(?:\s*["'`({*]|\s+[\w$]+\s*(?:,|from\b))/],
+      ["clock", /\bsetInterval\b|\bsetTimeout\b|\brequestAnimationFrame\b|\.animate\s*\(|<animate|["'`]animate(?:Transform|Motion)?["'`]|IntersectionObserver|\bmatchMedia\b/,
+        "rule 07. The figure runs a clock of its own. Move inside HL.register(stage, tick), with springs (stepS) or tweens (tset, tval); a delay is a tween's delay. The loop sleeps offscreen and honours reduced motion for you."],
+      ["hit", /getBoundingClientRect|elementFromPoint|elementsFromPoint|:hover|(?:addEventListener|\.on)\s*\(\s*(?:\w+\s*,\s*)?["'`](?:mouse|pointer|touch|click)|\bon(?:mouse|pointer|touch|click)\w*\s*=/,
+        "rule 01. The figure listens to the pointer itself or measures what is on screen. Take the pointer from HL.pointer(stage, { move, leave }) and test it against the rest or target pose, in world units."],
+    ];
+
+    /**
+     * What a figure must contain. The handle's keys may be written `set(v)`, `set: f`
+     * or, shorthand, `{ set, destroy }`. A call on something else, such as
+     * `map.set(k, v)`, is not the handle's `set`.
+     */
+    const NEED = [
+      ["clock", /\bregister\s*\(/, "rule 07. The figure never joins the kernel's loop. Draw inside HL.register(stage, tick), and give its unregister to destroy."],
+      ["hit", /\bpointer\s*\(/, "the figure never listens to the pointer. Call HL.pointer(stage, { move, leave }) and answer it."],
+      ["readout", /\bread\.textContent\s*=/, 'the figure never writes the read-out. Set read.textContent to what is under the pointer, and to "rest" when nothing is.'],
+      ["handle", /(?<![.\w$])set\s*[:(,}]/, "mount must return { set(value), destroy() }, and set is missing. It takes the slider's number."],
+      ["handle", /(?<![.\w$])destroy\s*[:(,}]/, "mount must return { set(value), destroy() }, and destroy is missing. It undoes everything mount did: bag.dispose."],
+    ];
+
+    /**
+     * Each `tset` given fewer than its four values. Without its delay a tween
+     * starts at no time at all: its value is NaN, and so is every path drawn from it.
+     */
+    function tweens(shape) {
+      const out = [];
+      for (const m of shape.matchAll(/(?<![\w$])tset\s*\(/g)) {
+        let i = m.index + m[0].length, depth = 1, given = 1;
+        for (; i < shape.length && depth; i++) {
+          const c = shape[i];
+          if ("([{".includes(c)) depth++;
+          else if (")]}".includes(c)) depth--;
+          else if (c === "," && depth === 1) given++;
+        }
+        const call = shape.slice(m.index, i).replace(/\s+/g, " ");
+        if (given < 4 && !call.includes("...")) {
+          out.push(`tween: \`${call}\` is given ${given} of tset's four values: tset(tw, to, now, delay). Without the delay the tween's value is NaN and nothing is drawn. Give it 0 to start at once.`);
+        }
+      }
+      return out;
+    }
+
+    /** The declaration at the end of the file, read as text. */
+    function declared(code) {
+      const say = (what) => `declare: the file must end with hairline({ name, means, rules, range, tour, mount }). ${what}`;
+      const m = /\bhairline\s*\(\s*\{([\s\S]*?)\}\s*\)\s*;?\s*$/.exec(code.trimEnd());
+      if (!m) return [say("That call is missing, or is not the last statement.")];
+      const d = m[1], wrong = [];
+      const list = (key) => {
+        const a = new RegExp(`\\b${key}:\\s*\\[([^\\]]*)\\]`).exec(d);
+        return a ? a[1].split(",").map((s) => s.trim()).filter(Boolean).map(Number) : null;
+      };
+      if (!/\bname:\s*(["'`])[a-z][a-z0-9-]{1,30}\1/.test(d)) wrong.push("name (lowercase letters, digits and hyphens)");
+      if (!/\bmeans:\s*(["'`])(?:(?!\1).){1,140}\1/.test(d)) wrong.push("means (one sentence, at most 140 characters)");
+      const rules = list("rules"), range = list("range");
+      if (!rules || !rules.length || rules.some((r) => !Number.isInteger(r) || r < 1 || r > 10)) wrong.push("rules (the numbers, 1 to 10, of the rules it leans on)");
+      const oneWay = range && range.length === 3 && range.every(Number.isFinite) && range[0] !== range[2] && (range[1] - range[0]) * (range[2] - range[1]) >= 0;
+      if (!oneWay) wrong.push("range (three numbers that move one way: the figure's value at intensity 0, 0.5 and 1)");
+      if (!/\bmount\b/.test(d)) wrong.push("mount");
+      return wrong.length ? [say(`Wrong or missing: ${wrong.join("; ")}.`)] : [];
+    }
+
+    /**
+     * The tour: three to six stops in the hairline() call, each a literal [x, y]
+     * inside the viewBox or null, at least one a point. The figure's own code never
+     * calls HL.tour; the bench and the package do.
+     */
+    function toured(code, shape) {
+      const out = [];
+      if (/\bHL\.tour\s*\(/.test(shape)) out.push("tour: the figure calls HL.tour itself. Declare tour in hairline() and let the bench play it.");
+      const call = /\bhairline\s*\(\s*\{([\s\S]*?)\}\s*\)\s*;?\s*$/.exec(code);
+      if (!call) return out;                                   // declare already said so
+      const body = call[1];
+      const open = /\btour:\s*\[/.exec(body);
+      if (!open) { out.push("tour: the call gives no tour. Add tour: [[x, y], ..., null], three to six stops that walk the figure through its answer."); return out; }
+      let depth = 0, end = -1;
+      for (let i = open.index + open[0].length - 1; i < body.length; i++) {
+        if (body[i] === "[") depth++;
+        else if (body[i] === "]" && --depth === 0) { end = i; break; }
+      }
+      if (end < 0) { out.push("tour: the tour's brackets do not close."); return out; }
+      const inner = body.slice(open.index + open[0].length, end);
+      const items = inner.match(/\[\s*([^\[\]]*)\]|null|[^\s,\[\]]+/g) ?? [];
+      const bad = [];
+      let points = 0;
+      for (const item of items) {
+        if (item === "null") continue;
+        const m = /^\[\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\]$/.exec(item);
+        const x = m && Number(m[1]), y = m && Number(m[2]);
+        if (!m || x < 0 || x > 400 || y < 0 || y > 320) { bad.push(item.replace(/\s+/g, " ")); continue; }
+        points++;
+      }
+      if (bad.length) out.push(`tour: each stop is a literal [x, y] with x in 0..400 and y in 0..320, or null. Not: ${bad.join(", ")}.`);
+      if (items.length < 3 || items.length > 6) out.push(`tour: ${items.length} stop${items.length === 1 ? "" : "s"}. A tour has three to six: enough to show the answer, few enough to stay a sentence.`);
+      if (!bad.length && !points) out.push("tour: every stop is null. At least one stop is a point on the figure.");
+      return out;
+    }
+    /* ---- end of validate.mjs ---- */
+    return (figure) => {
+        const src = String(figure ?? '').replace(/\r\n/g, '\n');
+        const code = bare(src);
+        const shape = bare(src, false);
+        const out = [];
+        try {
+            // eslint-disable-next-line no-new-func
+            Function(`"use strict";\n${src}`);
+        } catch (error) {
+            if (!/import\.meta|await/.test(String(error?.message))) out.push(`parse: the figure does not load: ${error.name}: ${error.message}. The browser stops there and draws nothing. Fix it in the figure and build again.`);
+        }
+        for (const [id, re, say, empty] of BAD) if (re.test(code) || empty?.test(shape)) out.push(`${id}: ${say}`);
+        for (const [id, re, say] of NEED) if (!re.test(code)) out.push(`${id}: ${say}`);
+        out.push(...tweens(shape), ...declared(code), ...toured(code, shape));
+        const lines = src.split('\n').length;
+        if (lines > LIMIT) out.push(`length: the figure is ${lines} lines and the limit is ${LIMIT}. A figure this long is usually two ideas: cut the concept down to one.`);
+        return out;
+    };
+})();
 const SKILL_FUNCTIONS = {
     'hairline-hairline-create': [{
         name: 'hairline_build',
         label: 'Hairline build',
         doing: 'Building the figure…',
-        description: 'Does what `node build.mjs <name>.js` does in the Hairline skill, without Node: puts your figure on the bench (bench.html with kernel.js and the figure in their two slots, nothing else changed) and shows the finished page to the user in the chat. Give the whole figure file. Use this instead of asking the user to run anything. There is no browser for you to look with here, so look.mjs cannot be run: say plainly that the look was not done.',
+        description: 'Does what `node build.mjs <name>.js` and `node validate.mjs` do in the Hairline skill, without Node: makes the checks validate.mjs makes on your figure and returns what it would print, then puts the figure on the bench (bench.html with kernel.js and the figure in their two slots, nothing else changed) and shows the finished page to the user in the chat. Give the whole figure file. When it returns things to fix, fix them in the figure and call it again. Use this instead of asking the user to run anything. The look (look.mjs) needs a browser, which you do not have here: when you are done, say in one sentence that you have not seen the figure drawn.',
         parameters: { type: 'object', properties: { code: { type: 'string', description: 'The whole figure file as you would save it in <name>.js, ending with its hairline({ ... }) call' } }, required: ['code'] },
-        run: (input, { show }) => {
+        run: (input, { show, kept }) => {
             const code = String(input?.code ?? '').replace(/\r\n/g, '\n').trim();
             const call = [...code.matchAll(/\bhairline\s*\(\s*\{/g)].at(-1);
             if (!call) return { content: 'Nothing was built. A figure file ends with hairline({ name, means, rules, range, tour, mount }).', failed: 'failed' };
             if (code.includes('```')) return { content: 'Nothing was built. The figure must not contain three backticks in a row.', failed: 'failed' };
             const name = /\bname:\s*["'`]([a-z][a-z0-9-]*)["'`]/.exec(code.slice(call.index))?.[1] || 'figure';
+            // A figure with something to fix is sent back once before it is shown, as the skill has it fixed before the
+            // look. A second build is shown whatever is left, so the person is never left with nothing.
+            const faults = hairlineFaults(code);
+            const before = kept?.get('hairline_build') || 0;
+            kept?.set('hairline_build', before + 1);
+            if (faults.length > 0 && before === 0) return { content: [`Not shown yet. validate found ${faults.length} to fix in hairline-${name}.html:`, ...faults, 'Fix these in the figure and call hairline_build again with the whole file.'].join('\n'), failed: 'failed' };
             show(['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}" palette="ground:background, ink:text, muted:text 65%, line:border, hairline-plate:background, hairline-hi:text, hairline-edge:text 55%, hairline-mid:text 32%, hairline-lo:border">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n'));
-            return { content: `Built hairline-${name}.html and showed it to the user in the chat. You cannot see the page from here.` };
+            return { content: faults.length > 0
+                ? [`Built hairline-${name}.html and showed it to the user in the chat, with ${faults.length} still to fix:`, ...faults, 'Tell the user what is still wrong. You cannot see the page from here.'].join('\n')
+                : `Built hairline-${name}.html and showed it to the user in the chat. validate: ok, the figure passes the static checks. You cannot see the page from here, so the look has not been done.` };
         }
     }]
 };
@@ -2472,7 +2700,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
         const draws = drawsComponents(chat);
         const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0) : [];
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -2490,6 +2718,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         // The room a model is given grows with what the reply has gathered: a skill it opened, a file it read.
         let room = numCtx;
         let grew = false;
+        // What a function wants to remember from one call to the next within this reply.
+        const kept = new Map();
         let corrected = false;
         let correcting = false;
         let firstTry = null;
@@ -2613,6 +2843,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 calls.splice(MAX_TOOL_CALLS);
 
                 messages.push({ role: 'assistant', content: said, tool_calls: calls });
+                let ended = false;
                 for (const call of calls) {
                     const name = String(call.function?.name || '');
                     // A small model sometimes calls a skill by its own name instead of through the function that opens it.
@@ -2627,7 +2858,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     write({ type: 'tool', tool: step.tool, input });
                     // Stop does not wait for a tool that is still running: a search, a page being read, a question to the person.
                     const outcome = await Promise.race([
-                        mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show }) : runSearchTool(name, input),
+                        mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show, kept }) : runSearchTool(name, input),
                         stopSignal.then(() => ({ content: 'The reply was stopped.', failed: 'refused' }))
                     ]);
                     if (outcome.failed) {
@@ -2635,10 +2866,13 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         write({ type: 'toolFailed', failed: outcome.failed });
                     }
                     messages.push({ role: 'tool', tool_name: name, content: outcome.content });
-                    if (gone) break;
+                    if (outcome.ends) ended = true;
+                    if (gone || ended) break;
                 }
                 // The tools are done; the model is thinking again.
                 write({ type: 'note', text: '' });
+                // A question put to the person is the end of the reply: the model is not asked to go on without the answer.
+                if (ended) break;
                 if (said && !/\s$/.test(reply.content)) {
                     reply.content += '\n\n';
                     write({ type: 'token', text: '\n\n' });
@@ -3543,7 +3777,7 @@ export const answerPermission = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true });
 });
 
-const runChatTool = async (tool, input, { chat, userId, write, stopped, show }) => {
+const runChatTool = async (tool, input, { chat, userId, write, stopped, show, kept }) => {
     try {
         if (!underLimit(userId)) return { content: 'The limit on tool use for this hour has been reached. Answer without tools and say so.', failed: 'limited' };
         if (tool.changes && !(chat.allowedTools || []).includes(tool.fn)) {
@@ -3552,7 +3786,7 @@ const runChatTool = async (tool, input, { chat, userId, write, stopped, show }) 
             if (answer === 'no') return { content: 'The person did not allow this tool to run. Do not try another way to do the same thing; say that it was not done.', failed: 'refused' };
             if (answer === 'always') chat.allowedTools = [...(chat.allowedTools || []), tool.fn];
         }
-        return await tool.run(input, { show });
+        return await tool.run(input, { show, kept });
     } catch (error) {
         const code = mapOllamaError(error).code;
         logger.warn('[Chat] Tool failed', { tool: tool.fn, code });
