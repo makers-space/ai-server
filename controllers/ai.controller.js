@@ -33,11 +33,50 @@ const SAMPLE = { full: 6, mixed: 3, large: 3 };
 const POPULAR_MODELS = 40;
 const PICK_ORDER = { fast: 0, balanced: 1, best: 2, code: 3, reasoning: 3 };
 const CLOUD_FIT = { verdict: 'cloud', label: 'Cloud only', fits: false, memoryNeededMb: 0, tokensPerSecond: null };
+const SIZE_WORD = /^\d+(\.\d+)?[bm]$/;
+const squash = (text) => String(text).toLowerCase().replace(/[^a-z0-9]+/g, '');
+const closeTo = (a, b, most) => {
+    if (Math.abs(a.length - b.length) > most) return false;
+    let row = Array.from({ length: b.length + 1 }, (unused, index) => index);
+    for (let i = 1; i <= a.length; i++) {
+        const next = [i];
+        for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        row = next;
+    }
+    return row[b.length] <= most;
+};
+// How well a model answers the words searched for; 0 means it does not. Spaces, dots and hyphens in a name are
+// ignored, a name counts for more than a description, and a loose search forgives a letter or two in a name.
+const searchScore = (model, words, loose = false) => {
+    const name = squash(model.name);
+    const text = `${model.description} ${model.capabilities.join(' ')}`.toLowerCase();
+    const parts = model.name.toLowerCase().split(/[^a-z0-9]+|(?<=[a-z])(?=\d)/).filter(Boolean);
+    let score = words.length > 1 && squash(words.join('')) === name ? 100 : 0;
+    for (const word of words) {
+        const plain = squash(word);
+        let gained = 0;
+        if (plain && name === plain) gained = 100;
+        else if (plain && name.startsWith(plain)) gained = 40;
+        else if (plain && name.includes(plain)) gained = 20;
+        else if (text.includes(word)) gained = 5;
+        else if (loose && plain.length >= 4 && parts.some((part) => closeTo(part, plain, plain.length >= 8 ? 2 : 1))) gained = 2;
+        if (gained === 0) return 0;
+        score += gained;
+    }
+    return score;
+};
+
 // The whole library, searched and ordered on the server and handed out a page at a time.
 // Recommendations come only from the most downloaded models, so an obscure model is never the suggestion.
 const liveCatalogue = async (query, hardware) => {
     const models = await libraryModels();
-    const words = String(query?.q || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const words = String(query?.q || '').toLowerCase().split(/[\s:]+/).filter(Boolean);
+    // A word such as 7b asks for that size of a model, unless it is part of a model's name.
+    const sizes = words.filter((word) => SIZE_WORD.test(word) && !models.some((model) => squash(model.name).includes(squash(word))));
+    const terms = words.filter((word) => !sizes.includes(word));
+    const purpose = query?.purpose || null;
+    const can = String(query?.can || '').split(',').filter(Boolean);
+    const fitting = Boolean(hardware) && (query?.fits === true || query?.fits === 'true');
     const page = Number(query?.page) || 1;
     const size = Number(query?.size) || CATALOGUE_PAGE;
     // How the list under the recommendations is ordered; the recommendations themselves always come first.
@@ -49,17 +88,32 @@ const liveCatalogue = async (query, hardware) => {
     };
     const chosenOrder = ORDERS[query?.sort] || null;
     const popular = new Set([...models].sort((a, b) => b.pulls - a.pulls).slice(0, POPULAR_MODELS).map((model) => model.name));
-    const matching = models.filter((model) => words.every((word) => `${model.name} ${model.description}`.toLowerCase().includes(word)));
+    const sized = models.filter((model) => sizes.every((size) => model.sizes.some((own) => own.toLowerCase() === size)));
+    const scores = new Map();
+    const score = (loose) => sized.filter((model) => {
+        const gained = terms.length > 0 ? searchScore(model, terms, loose) : 1;
+        if (gained > 0) scores.set(model.name, gained);
+        return gained > 0;
+    });
+    let matching = score(false);
+    // Nothing by that spelling: the closest names are shown instead, and the page says so.
+    const near = matching.length === 0 && terms.length > 0;
+    if (near) matching = score(true);
+    const scoreOf = (entry) => scores.get(entry.tag.split(':')[0]) || 0;
     await loadLibrarySizes(matching.filter((model) => popular.has(model.name)).map((model) => model.name));
 
     const order = () => {
-        const entries = libraryEntries(matching);
+        const entries = libraryEntries(matching)
+            .filter((entry) => sizes.length === 0 || entry.cloudOnly || sizes.includes(entry.tag.split(':')[1]?.toLowerCase()))
+            .filter((entry) => !purpose || entry.goodFor.includes(purpose))
+            .filter((entry) => can.every((ability) => entry.capabilities.includes(ability)));
         const isPopular = (entry) => !entry.cloudOnly && popular.has(entry.tag.split(':')[0]);
         const all = hardware
             ? [...rankCatalogue(entries.filter(isPopular), hardware), ...entries.filter((entry) => !isPopular(entry)).map((entry) => ({ ...entry, fit: entry.cloudOnly ? CLOUD_FIT : fitModel(entry, hardware), pick: null }))]
             : entries.map((entry) => ({ ...entry, fit: null, pick: null }));
-        return all.sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
+        return all.filter((entry) => !fitting || entry.fit.fits).sort((a, b) => (PICK_ORDER[a.pick] ?? 9) - (PICK_ORDER[b.pick] ?? 9)
             || (chosenOrder ? chosenOrder(a, b) || a.parameters - b.parameters : 0)
+            || (terms.length > 0 ? scoreOf(b) - scoreOf(a) : 0)
             || Number(a.cloudOnly) - Number(b.cloudOnly)
             || Number(b.fit?.fits ?? true) - Number(a.fit?.fits ?? true)
             || b.pulls - a.pulls
@@ -99,6 +153,7 @@ const liveCatalogue = async (query, hardware) => {
         all,
         entries,
         query: words.join(' '),
+        near: near && matching.length > 0,
         page,
         size,
         paged: unpicked(all).length,
@@ -1314,6 +1369,7 @@ export const getPublicCatalogue = asyncHandler(async (req, res) => {
         success: true,
         source: 'ollama.com',
         query: live.query,
+        near: live.near,
         page: live.page,
         size: live.size,
         paged: live.paged,
@@ -1348,6 +1404,7 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
         success: true,
         source: 'ollama.com',
         query: live.query,
+        near: live.near,
         page: live.page,
         size: live.size,
         paged: live.paged,
@@ -1645,7 +1702,7 @@ const openSkillTool = (listed) => {
             type: 'function',
             function: {
                 name: 'open_skill',
-                description: `Open one of this chat's skills and get its full instructions. Open a skill before answering when the request matches its description.\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n')}`,
+                description: `Open one of this chat's skills and get its full instructions. Open a skill before answering when the request matches its description. The instructions are written for you and the user does not see them: do what they say in your reply, and do not repeat them back.\n${listed.map((skill) => `- ${skill.name}: ${skill.description}`).join('\n')}`,
                 parameters: { type: 'object', properties: { skill: { type: 'string', enum: listed.map((skill) => skill.name), description: 'The name of the skill to open' } }, required: ['skill'] }
             }
         },
@@ -1874,7 +1931,7 @@ const openComponentTool = () => {
             type: 'function',
             function: {
                 name: 'open_component',
-                description: "Get the page for a component: every attribute it takes, every value, and what each does on screen. Open a component's page before you write that component.",
+                description: "Get the page for a component: every attribute it takes, every value, and what each does on screen. Open a component's page before you write that component. This function only returns the page and draws nothing: a component is drawn by writing its tags in your reply, inside a ```component fence.",
                 parameters: { type: 'object', properties: { component: { type: 'string', description: 'The name of the component, or several names separated by commas, such as Card, Badge' } }, required: ['component'] }
             }
         },
