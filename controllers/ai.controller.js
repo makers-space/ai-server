@@ -1642,11 +1642,29 @@ export const skillFileText = (skill, wanted) => {
     const file = (skill?.files || []).find((one) => one.path === asked) || (skill?.files || []).find((one) => one.path.toLowerCase() === asked.toLowerCase());
     return file ? fs.readFileSync(path.join(skill.folder, file.path), 'utf8').replace(/\r\n/g, '\n').slice(0, MAX_SKILL_FILE_CHARS) : null;
 };
+// What a skill asks for that a chat may not have: commands to run, and files of its own to open. A line that only
+// installs the skill itself is not a command the model has to run, and a program's name in a sentence is not one
+// either: a command counts when it is written as code.
+const INSTALL_LINE = /^.*(?:\bnpx (?:-y )?skills add\b|\bgit clone \S+ && cp -r\b|\/plugin (?:marketplace add|install)\b).*$/gim;
+const COMMAND = /^\s*\$?\s*(?:python3?|pip3?|npx|npm|node|uv|docker|brew|bash|sh)\s+[\w./@-]/im;
+const skillNeeds = (body) => {
+    const text = String(body).replace(INSTALL_LINE, '');
+    const fenced = [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)].map((match) => match[1]);
+    const spans = [...text.replace(/```[\s\S]*?```/g, '').matchAll(/`([^`\n]+)`/g)].map((match) => match[1]);
+    const shell = [...text.matchAll(/```(?:bash|sh|shell|zsh)\n([\s\S]*?)```/gi)].some((match) => match[1].split('\n').some((line) => line.trim() && !line.trim().startsWith('#')));
+    return [
+        (shell || /(?:^|[\s`"'(])scripts\/[\w.-]+/.test(text) || [...fenced, ...spans].some((piece) => COMMAND.test(piece))) && 'commands',
+        /\b(references?|resources?|assets|templates?|examples?|rules|docs)\/[\w./-]+\.\w+|\]\((?!https?:|#)[^)]+\.(md|txt|json|ya?ml|py|sh|js|ts)\)/i.test(text) && 'files'
+    ].filter(Boolean);
+};
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
     const head = text.match(/^---\n([\s\S]*?)\n---\n/);
     const facts = Object.fromEntries((head?.[1] || '').split('\n').map((line) => line.match(/^(\w+):\s*(.*)$/)).filter(Boolean).map((match) => [match[1], match[2].trim()]));
-    const needs = (facts.needs || '').split(',').filter(Boolean);
+    const files = skillFilesIn(path.join(LIBRARY, source, file.slice(0, -3)));
+    // The mark a skill was given when it was taken in is kept only where it still holds: its files may be here now.
+    const asks = skillNeeds(text.slice(head?.[0].length || 0));
+    const needs = (facts.needs || '').split(',').filter((need) => asks.includes(need) && !(need === 'files' && files.length > 0));
     const name = facts.name || file.slice(0, -3);
     return {
         id: file.slice(0, -3),
@@ -1658,7 +1676,7 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
         source,
         needs,
         folder: path.join(LIBRARY, source, file.slice(0, -3)),
-        files: skillFilesIn(path.join(LIBRARY, source, file.slice(0, -3))),
+        files,
         text: `SKILL: ${name}\n\n${text.slice(head?.[0].length || 0).trim()}`,
         remember: ''
     };
@@ -1674,10 +1692,6 @@ export const SUGGESTED_SKILLS = ['engineering-grilling', 'dex-brainstorming', 'e
 export const MAX_OWN_SKILLS = 50;
 const MAX_SKILL_BYTES = 120 * 1024;
 const ownSkillCache = new Map();
-const skillNeeds = (body) => [
-    /\b(python3?|pip|npx|npm|node|uv|docker|brew)\s+[\w./-]|scripts\/[\w.-]+|```(bash|sh|shell|zsh)\n/i.test(body) && 'commands',
-    /\b(references?|resources?|assets|templates?|examples?|rules|docs)\/[\w./-]+\.\w+|\]\((?!https?:|#)[^)]+\.(md|txt|json|ya?ml|py|sh|js|ts)\)/i.test(body) && 'files'
-].filter(Boolean);
 const ownSkill = (doc) => {
     const needs = skillNeeds(doc.text);
     return {
@@ -2242,7 +2256,8 @@ const openComponentTool = () => {
     };
 };
 
-const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs, tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
+// A skill with functions of Mollama's own has its commands: they do what its scripts do.
+const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs: needs.filter((need) => need !== 'commands' || !SKILL_FUNCTIONS[id]), tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
 export const listSkills = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
     const all = [...SKILLS, ...await ownSkillsOf(req.user.id)];
