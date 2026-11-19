@@ -918,6 +918,34 @@ export const setFilesFetch = (replacement) => {
     filesFetch = replacement || realFetch;
 };
 
+// The skill runner is a separate service that runs a skill's own scripts; no script runs on this server. A request to
+// it is signed with a secret both sides hold. It is optional: without its address and secret no script function is offered.
+let runnerFetch = realFetch;
+export const setRunnerFetch = (replacement) => {
+    runnerFetch = replacement || realFetch;
+};
+export const skillRunnerReady = () => Boolean(process.env.SKILL_RUNNER_URL && process.env.SKILL_RUNNER_SECRET);
+export const runSkillScript = async (job) => {
+    const raw = JSON.stringify(job);
+    const stamp = String(Date.now());
+    const signature = crypto.createHmac('sha256', process.env.SKILL_RUNNER_SECRET).update(`${stamp}.${raw}`).digest('hex');
+    let response;
+    try {
+        response = await runnerFetch(`${String(process.env.SKILL_RUNNER_URL).replace(/\/+$/, '')}/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Runner-Timestamp': stamp, 'X-Runner-Signature': signature },
+            body: raw,
+            signal: AbortSignal.timeout(360000)
+        });
+    } catch {
+        throw new Error('The skill runner could not be reached. It may be waking up; try again in a minute.');
+    }
+    const body = await response.json().catch(() => ({}));
+    if (response.status === 400 || response.status === 404 || response.status === 413) throw new Error(String(body.detail || 'The skill runner refused the request.'));
+    if (!response.ok) throw new Error(`The skill runner answered with status ${response.status}.`);
+    return body;
+};
+
 export const createFilesClient = ({ baseUrl, accessToken }) => {
     const root = `${String(baseUrl || '').replace(/\/+$/, '')}/api/v1/files`;
     const csrf = 'ai-base-server';
@@ -965,6 +993,23 @@ export const createFilesClient = ({ baseUrl, accessToken }) => {
             if (Number(response.headers.get('content-length')) > MAX_ATTACHMENT_BYTES) throw new OllamaError('FILE_TOO_LARGE');
             const buffer = Buffer.from(await response.arrayBuffer());
             return { name, text: await extractText({ buffer, name }) };
+        },
+
+        // A file as it is stored, for work that needs more than its text.
+        async bytes(filePath) {
+            const response = await call(address(filePath, 'download'), { headers: { Accept: '*/*' } });
+            if (Number(response.headers.get('content-length')) > MAX_ATTACHMENT_BYTES) throw new OllamaError('FILE_TOO_LARGE');
+            return { name: filePath.split('/').pop(), buffer: Buffer.from(await response.arrayBuffer()) };
+        },
+
+        // Files put into a folder as they are. A name already taken there is not overwritten: the new file is renamed.
+        async upload(folder, entries) {
+            const form = new FormData();
+            entries.forEach((entry) => form.append('files', new Blob([entry.buffer]), entry.path));
+            form.append('relativePaths', JSON.stringify(entries.map((entry) => entry.path)));
+            form.append('basePath', folder);
+            form.append('onConflict', 'rename');
+            await call(`${root}/upload`, { method: 'POST', body: form }, 'FILE_NOT_SAVED');
         },
 
         async save(folder, name, content) {

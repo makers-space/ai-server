@@ -12,7 +12,7 @@ import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
-    GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
+    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
@@ -2072,11 +2072,73 @@ const SKILL_FUNCTIONS = {
         }
     }]
 };
-const skillFunctionsFor = (chat) => skillsOf(chat).flatMap((skill) => (SKILL_FUNCTIONS[skill.id] || []).map((entry) => ({
+// The office skills' own scripts run on the skill runner, on files from the person's FilesystemOne, and what a script
+// makes is saved back there. Only a script that ships with the skill is run, never code a model writes, so these
+// skills still say "Guidance only": the parts that have the model write its own program are not done here.
+const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf' };
+// Whose files a reply may reach: the sign-in of the person who sent the message.
+const filesScope = new AsyncLocalStorage();
+const runnerFunction = (kind) => ({
+    name: `${kind}_script`,
+    label: `${kind} script`,
+    doing: 'Running the script…',
+    changes: true,
+    description: `Runs one of the ${kind} skill's own scripts, as the skill writes it (\`python scripts/...\`), on files from the user's FilesystemOne. Give the script's path inside the skill, its arguments, and the FilesystemOne path of every file it works on: each is put in an empty folder under its own file name, so name it that way in the arguments. Files the script makes or changes are saved to save_to, or beside the first file. Only the skill's own Python scripts run; a script that needs LibreOffice or poppler fails and says so, and a program you write yourself cannot be run here.`,
+    parameters: {
+        type: 'object',
+        properties: {
+            script: { type: 'string', description: 'The script as the skill names it, such as scripts/office/validate.py' },
+            args: { type: 'array', items: { type: 'string' }, description: 'The arguments, in order, each as one piece of text' },
+            files: { type: 'array', items: { type: 'string' }, description: "FilesystemOne paths of the files the script works on, such as /docs/report.docx" },
+            save_to: { type: 'string', description: 'The FilesystemOne folder for the files the script makes. Left out, the folder of the first file.' }
+        },
+        required: ['script']
+    },
+    run: async (input) => {
+        const script = String(input?.script || '').trim().replace(/^python3?\s+/, '');
+        const args = Array.isArray(input?.args) ? input.args.map(String) : [];
+        const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
+        const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
+        if (!script) return { content: 'Nothing was run. Name the script as the skill writes it, such as scripts/office/validate.py.', failed: 'failed' };
+        const files = createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore() });
+        let sent;
+        try {
+            sent = [];
+            for (const one of paths) {
+                const file = await files.bytes(one);
+                sent.push({ path: file.name, data: file.buffer.toString('base64') });
+            }
+        } catch {
+            return { content: `Nothing was run. A file could not be read from the user's FilesystemOne: ${paths.join(', ')}. Check the path with them.`, failed: 'failed' };
+        }
+        let answer;
+        try {
+            answer = await runSkillScript({ skill: kind, script, args, files: sent });
+        } catch (error) {
+            return { content: `Nothing was run. ${error.message}`, failed: 'failed' };
+        }
+        const made = (answer.files || []).slice(0, 40);
+        const names = made.map((file) => file.path).join(', ');
+        let saved = '';
+        if (made.length > 0 && (!folder || folder === '/')) saved = `It made ${names}, but nothing was saved: call again with save_to, a folder in the user's FilesystemOne.`;
+        else if (made.length > 0) {
+            try {
+                await files.upload(folder, made.map((file) => ({ path: file.path, buffer: Buffer.from(file.data, 'base64') })));
+                saved = `Saved in ${folder}: ${names}. A name already taken there was not overwritten; that file was given a new name.`;
+            } catch {
+                saved = `It made ${names}, but they could not be saved in ${folder}.`;
+            }
+        }
+        const ended = answer.timedOut ? 'was stopped because it ran too long' : `finished with exit code ${answer.exitCode}`;
+        const content = [`${[script, ...args].join(' ')} ${ended}.`, answer.stdout && `It printed:\n${clip(answer.stdout, 6000)}`, answer.stderr && `Errors:\n${clip(answer.stderr, 3000)}`, saved].filter(Boolean).join('\n\n');
+        return { content, ...(answer.timedOut || answer.exitCode !== 0 ? { failed: 'failed' } : {}) };
+    }
+});
+const skillFunctionsFor = (chat) => skillsOf(chat).flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []), ...(RUNNER_SKILLS[skill.id] && skillRunnerReady() ? [runnerFunction(RUNNER_SKILLS[skill.id])] : [])].map((entry) => ({
     fn: entry.name,
     label: entry.label,
     doing: entry.doing,
-    changes: false,
+    changes: Boolean(entry.changes),
     shown: () => skill.name,
     definition: { type: 'function', function: { name: entry.name, description: entry.description, parameters: entry.parameters } },
     run: async (input, context) => entry.run(input, context)
@@ -3041,6 +3103,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
     if (!chat) return;
     const target = await chatTarget(req, chat);
     deviceScope.enterWith(target);
+    filesScope.enterWith(req.cookies?.accessToken);
     if (!chat.device && target.kind === 'companion') chat.device = target.id;
     if (!busyChats.has(chat.id)) return takeTurns(chat, req.body, req.user.id, res);
     if (req.body.regenerate || req.body.editIndex !== undefined) {
