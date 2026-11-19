@@ -58,6 +58,11 @@ const ERROR_TABLE = {
         message: 'The model ran out of room before it finished, so this reply is incomplete.',
         action: 'Ask again in a new chat, turn off a long skill, or pick a model that can read more.'
     },
+    CALL_UNREADABLE: {
+        status: 502,
+        message: 'The model tried to use a function but wrote the request so that it could not be read.',
+        action: 'Ask again. If it keeps happening, pick a model that is better with tools.'
+    },
     TOO_LONG: {
         status: 422,
         message: 'The conversation is too long for this model.',
@@ -207,13 +212,16 @@ const ERROR_TABLE = {
 
 const CONNECTION_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'EHOSTUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET']);
 
+// What Ollama says when a model's function call is not something it can parse.
+export const UNREADABLE_CALL = /tool call|invalid character .{1,12}(looking for|after|in )|unexpected end of JSON|cannot unmarshal/i;
 const RULES = [
     ['DISK_FULL', /no space left|not enough (disk )?space|insufficient disk/i],
     ['OUT_OF_MEMORY', /requires more system memory|out of memory|insufficient memory|not enough memory|cuda error.*memory/i],
     ['NO_TOOL_SUPPORT', /does not support tools/i],
     ['TOO_LONG', /context length|context window|exceeds? (the )?(maximum )?context|prompt is too long/i],
     ['DOWNLOAD_INTERRUPTED', /unexpected eof|connection reset|stalled|max retries exceeded|pull.*interrupted/i],
-    ['MODEL_MISSING', /model.*not found|not found.*model|try pulling it first|file does not exist|manifest.*(unknown|not found)/i]
+    ['MODEL_MISSING', /model.*not found|not found.*model|try pulling it first|file does not exist|manifest.*(unknown|not found)/i],
+    ['CALL_UNREADABLE', UNREADABLE_CALL]
 ];
 
 export class OllamaError extends Error {

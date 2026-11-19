@@ -11,7 +11,7 @@ import { asyncHandler, getNotificationService } from '../middleware/app.middlewa
 import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
-    OllamaError, mapOllamaError, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
+    OllamaError, mapOllamaError, UNREADABLE_CALL, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
     GenerationQueue, estimateTokens, extractText, createFilesClient, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
@@ -1876,6 +1876,11 @@ export const componentFaults = (text) => {
     const known = Object.keys(COMPONENT_RULES);
     const exact = new Map(known.map((name) => [name.toLowerCase(), name]));
     for (const block of componentBlocks(text)) {
+        // Some models put program code or their own words in a component block, which draws nothing.
+        if (!/^\s*<[A-Za-z]/.test(block)) {
+            faults.push('A component block holds only component tags, and one of yours holds something else. Program code goes in an ordinary code fence, and words go outside the block.');
+            continue;
+        }
         // What is written inside these is their own text (a page, code, a drawing), not tags of the chat's.
         const tagsOnly = WHOLE_TEXT_TAGS.reduce((kept, name) => kept.replace(new RegExp(`(<${name}\\b[^>]*>)[\\s\\S]*?(</${name}\\s*>)`, 'gi'), '$1$2'), block);
         for (const match of tagsOnly.matchAll(/<([A-Za-z][\w]*)\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/g)) {
@@ -2438,6 +2443,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         let corrected = false;
         let correcting = false;
         let firstTry = null;
+        let reasked = false;
         let evalCount = 0;
         let evalSeconds = 0;
         let totalMs = 0;
@@ -2460,6 +2466,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 const calls = [];
                 let said = '';
                 let endedBy = null;
+                let unread = false;
+                try {
                 stream = await ollama.chat(request, halt.signal);
                 if (gone) stream.abort?.();
                 for await (const part of stream) {
@@ -2489,6 +2497,20 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         // returned, which is gone once the reply is written, so they are not what the chat is measured by.
                         promptEvalCount = promptEvalCount || part.prompt_eval_count || null;
                     }
+                }
+                } catch (error) {
+                    // A small model sometimes writes a function call that Ollama cannot read, which ends the reply with
+                    // an error. It is asked once more, as a second attempt usually comes out right.
+                    if (gone || reasked || !request.tools || !UNREADABLE_CALL.test(String(error?.error || error?.message || ''))) throw error;
+                    unread = true;
+                }
+                if (unread) {
+                    reasked = true;
+                    reply.content = reply.content.slice(0, reply.content.length - said.length);
+                    write({ type: 'replace', text: reply.content });
+                    write({ type: 'note', text: 'The model wrote a function call that could not be read. Asking again…' });
+                    correcting = true;
+                    continue;
                 }
                 if (calls.length === 0 && request.tools && !gone) {
                     const written = writtenToolCalls(said);
@@ -2574,7 +2596,12 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
             }
         } catch (error) {
             if (gone) reply.stopped = true;
-            else reply.errorCode = mapOllamaError(error).code;
+            else {
+                const failure = mapOllamaError(error);
+                reply.errorCode = failure.code;
+                // A failure Mollama has no name for is written down, or it could never be given one.
+                if (failure.code === 'UNKNOWN') logger.warn('[Chat] A reply failed for a reason with no name yet', { chatId: chat.id, model: chat.model, detail: String(failure.detail || error?.stack || '').slice(0, 600) });
+            }
         }
         reply.stats = {
             evalCount: evalCount || null,
