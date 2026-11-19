@@ -1784,6 +1784,76 @@ export const COMPONENT_PAGES = fs.readdirSync(path.join(INSTRUCTIONS, 'component
     name: file.slice(0, -3),
     text: fs.readFileSync(path.join(INSTRUCTIONS, 'components', file), 'utf8').replace(/\r\n/g, '\n').trim()
 }));
+// A reply's components are checked by rule before the reply is finished, with no model involved: which tags exist and
+// which attributes each must have are read from the index, so the check and the instructions cannot drift apart. When
+// something cannot be drawn, the model that wrote it is told why, given the pages of the components it used, and
+// writes the reply once more.
+const COMPONENT_RULES = (() => {
+    const index = SKILLS.find((skill) => skill.id === 'components').text;
+    const required = (list) => String(list || '').split(',').map((word) => word.trim()).filter((word) => word.endsWith('*')).map((word) => word.slice(0, -1));
+    const tags = {};
+    for (const line of index.split('\n').filter((one) => one.startsWith('- '))) {
+        tags[line.slice(2).split(':')[0]] = required(line.match(/Attributes: ([^.]*)\./)?.[1]);
+        for (const inner of line.matchAll(/([A-Z][A-Za-z]*) tags \(([^)]*)\)/g)) tags[inner[1]] = required(inner[2]);
+    }
+    return tags;
+})();
+const WHOLE_TEXT_TAGS = ['Frame', 'Editor', 'Image', 'Model3D'];
+const FILE_TAGS = ['Video', 'Audio', 'PdfViewer', 'Model3D', 'Editor', 'Data', 'Image'];
+const TOP_COMPONENTS = COMPONENT_PAGES.map((page) => page.name);
+const BARE_COMPONENT = new RegExp(`^[ \\t]*<(${TOP_COMPONENTS.join('|')})[\\s>/]`, 'm');
+// The parts of a reply the chat would try to draw: fenced component blocks, and components written with no fence.
+const componentBlocks = (text) => {
+    const pieces = String(text ?? '').split(/(```[\s\S]*?(?:```|$))/);
+    return pieces.flatMap((piece, position) => {
+        if (position % 2 === 1) return /^```component\b/.test(piece) ? [piece.replace(/^```component[^\n]*\n?/, '').replace(/```\s*$/, '')] : [];
+        const at = piece.search(BARE_COMPONENT);
+        return at === -1 ? [] : [piece.slice(at)];
+    });
+};
+export const componentFaults = (text) => {
+    const faults = [];
+    const used = new Set();
+    const known = Object.keys(COMPONENT_RULES);
+    const exact = new Map(known.map((name) => [name.toLowerCase(), name]));
+    for (const block of componentBlocks(text)) {
+        // What is written inside these is their own text (a page, code, a drawing), not tags of the chat's.
+        const tagsOnly = WHOLE_TEXT_TAGS.reduce((kept, name) => kept.replace(new RegExp(`(<${name}\\b[^>]*>)[\\s\\S]*?(</${name}\\s*>)`, 'gi'), '$1$2'), block);
+        for (const match of tagsOnly.matchAll(/<([A-Za-z][\w]*)\b((?:"[^"]*"|'[^']*'|[^>"'])*)>/g)) {
+            const name = exact.get(match[1].toLowerCase());
+            if (!name) {
+                faults.push(`"${match[1]}" is not a component. The components are: ${TOP_COMPONENTS.join(', ')}.`);
+                continue;
+            }
+            if (TOP_COMPONENTS.includes(name)) used.add(name);
+            const attributes = new Map([...match[2].matchAll(/([A-Za-z_][\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+)))?/g)].map((found) => [found[1], found[2] ?? found[3] ?? found[4] ?? true]));
+            for (const need of COMPONENT_RULES[name]) {
+                if (!attributes.has(need) || attributes.get(need) === '') faults.push(`${name} needs the attribute "${need}".`);
+            }
+            const address = attributes.get('src');
+            if (FILE_TAGS.includes(name) && typeof address === 'string' && address && !/^https:\/\//i.test(address)) faults.push(`${name}: src must be a full https address of a real file, not "${clip(address, 60)}". Do not make an address up.`);
+        }
+    }
+    return { faults: [...new Set(faults)].slice(0, 8), used: [...used] };
+};
+const CHECK_STEP = 'Drawing check';
+// The pages sent with a correction are kept to a size a small model still has room for.
+const CORRECTION_PAGE_CHARS = 9000;
+const correctionFor = ({ faults, used }) => {
+    const pages = [];
+    let size = 0;
+    for (const page of COMPONENT_PAGES.filter((one) => used.includes(one.name)).sort((a, b) => a.text.length - b.text.length)) {
+        if (size + page.text.length > CORRECTION_PAGE_CHARS) break;
+        pages.push(page);
+        size += page.text.length;
+    }
+    return [
+        'The chat could not draw part of your reply:',
+        ...faults.map((fault) => `- ${fault}`),
+        ...pages.map((page) => `\n${page.text}`),
+        '\nWrite your whole reply again with this put right. Do not mention this correction.'
+    ].join('\n');
+};
 const COMPONENT_STEP = 'Component';
 // Room kept for the pages of the few components one reply draws.
 const COMPONENT_ROOM = 5000;
@@ -2302,6 +2372,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
             write({ type: 'token', text });
         };
         const numCtx = sizeFor(messages, listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
+        let corrected = false;
+        let correcting = false;
+        let firstTry = null;
         let evalCount = 0;
         let evalSeconds = 0;
         let totalMs = 0;
@@ -2333,6 +2406,10 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         write({ type: 'thinking', text: part.message.thinking });
                     }
                     if (part.message?.content) {
+                        if (correcting) {
+                            correcting = false;
+                            write({ type: 'note', text: '' });
+                        }
                         said += part.message.content;
                         reply.content += part.message.content;
                         write({ type: 'token', text: part.message.content });
@@ -2355,6 +2432,28 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         write({ type: 'replace', text: reply.content });
                         said = written.text;
                     }
+                }
+                // What the model drew is checked once, and it is given one chance to put right what cannot be drawn.
+                if (calls.length === 0 && !gone && !corrected && draws && round < MAX_TOOL_ROUNDS) {
+                    const check = componentFaults(said);
+                    if (check.faults.length > 0) {
+                        corrected = true;
+                        correcting = true;
+                        firstTry = said;
+                        reply.content = reply.content.slice(0, reply.content.length - said.length);
+                        reply.steps.push({ tool: CHECK_STEP, input: clip(check.faults[0], 200), failed: null });
+                        write({ type: 'replace', text: reply.content });
+                        write({ type: 'tool', tool: CHECK_STEP, input: clip(check.faults[0], 200) });
+                        write({ type: 'note', text: 'Correcting what it drew…' });
+                        messages.push({ role: 'assistant', content: said }, { role: 'user', content: correctionFor(check) });
+                        continue;
+                    }
+                }
+                // A second attempt that says nothing is no improvement: the first is put back, faults and all.
+                if (calls.length === 0 && !gone && firstTry !== null && !said.trim()) {
+                    reply.content += firstTry;
+                    write({ type: 'note', text: '' });
+                    write({ type: 'token', text: firstTry });
                 }
                 if (calls.length === 0 || gone) break;
                 calls.splice(MAX_TOOL_CALLS);
