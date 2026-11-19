@@ -2268,6 +2268,25 @@ const COMPONENT_VALUES = (() => {
     }
     return tags;
 })();
+// A model that cannot use tools cannot open a component's page, so it is given one compact page instead: the values
+// each attribute takes, read from the same tables the drawing check reads. An attribute that many components share
+// is listed once. It goes after the Components skill, and only to a model that has no way to ask for a page.
+export const COMPONENT_VALUES_PAGE = (() => {
+    const say = (rule) => (rule.values ? rule.values.join(', ') : 'a number');
+    const shared = {};
+    for (const attributes of Object.values(COMPONENT_VALUES)) for (const [attribute, rule] of Object.entries(attributes)) (shared[`${attribute} = ${say(rule)}`] ||= []).push(attribute);
+    const common = Object.entries(shared).filter(([, uses]) => uses.length >= 4).map(([line]) => line);
+    const lines = Object.entries(COMPONENT_VALUES).map(([tag, attributes]) => {
+        const own = Object.entries(attributes).map(([attribute, rule]) => `${attribute} = ${say(rule)}`).filter((line) => !common.includes(line));
+        return own.length > 0 ? `- ${tag}: ${own.join('; ')}` : null;
+    }).filter(Boolean);
+    return [
+        'COMPONENT VALUES',
+        'The values each attribute takes. An attribute that is not listed here takes what its name says: text, a length with its unit, a number or an address. Any other value is not drawn.',
+        `On every component that has the attribute: ${common.join('; ')}`,
+        ...lines
+    ].join('\n');
+})();
 const WHOLE_TEXT_TAGS = ['Frame', 'Editor', 'Image', 'Model3D'];
 const FILE_TAGS = ['Video', 'Audio', 'PdfViewer', 'Model3D', 'Editor', 'Data', 'Image'];
 const TOP_COMPONENTS = COMPONENT_PAGES.map((page) => page.name);
@@ -2514,7 +2533,7 @@ export const todayLine = () => `Today is ${new Date().toLocaleDateString('en-GB'
 const buildMessages = (chat, listing = false) => {
     const out = [];
     const active = sortSkills(chat, listing).full;
-    const system = [...active.map((skill) => skill.text), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
+    const system = [...active.map((skill) => (skill.id === 'components' && !listing ? `${skill.text}\n\n${COMPONENT_VALUES_PAGE}` : skill.text)), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
