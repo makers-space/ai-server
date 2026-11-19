@@ -1433,7 +1433,8 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
     });
 });
 
-const MAX_TOOL_ROUNDS = 6;
+// A reply that opens a skill, reads four of its files, builds and then mends what it built needs eight on its own.
+const MAX_TOOL_ROUNDS = 10;
 const MAX_TOOL_CALLS = 4;
 const SEARCH_CONTEXT = 16384;
 const SEARCH_TOOLS = [
@@ -1516,6 +1517,16 @@ export const writtenToolCalls = (text) => {
     return { calls, text: original.slice(0, cut).replace(/(?:\s|\[|<tool_call>|```(?:json)?)+$/i, '') };
 };
 
+// A model sometimes gets a function's name slightly wrong: open_skill_skill, openSkill, websearch.
+const nearestFunction = (name, names) => {
+    const plain = (text) => String(text).toLowerCase().replace(/[^a-z0-9]/g, '');
+    const asked = plain(name);
+    if (!asked) return null;
+    return names.find((one) => plain(one) === asked)
+        || [...names].sort((a, b) => b.length - a.length).find((one) => asked.startsWith(plain(one)))
+        || names.find((one) => closeTo(plain(one), asked, 2))
+        || null;
+};
 const runSearchTool = async (name, input) => {
     const text = (content) => ({ content, failed: null });
     try {
@@ -2002,8 +2013,13 @@ const SKILL_FUNCTIONS = {
             const faults = hairlineFaults(code);
             const before = kept?.get('hairline_build') || 0;
             kept?.set('hairline_build', before + 1);
-            if (faults.length > 0 && before === 0) return { content: [`Not shown yet. validate found ${faults.length} to fix in hairline-${name}.html:`, ...faults, 'Fix these in the figure and call hairline_build again with the whole file.'].join('\n'), failed: 'failed' };
-            show(['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}" palette="ground:background, ink:text, muted:text 65%, line:border, hairline-plate:background, hairline-hi:text, hairline-edge:text 55%, hairline-mid:text 32%, hairline-lo:border">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n'));
+            const block = ['```component', `<Frame template="hairline-hairline-create/bench.html" height="640px" title="Hairline ${name}" palette="ground:background, ink:text, muted:text 65%, line:border, hairline-plate:background, hairline-hi:text, hairline-edge:text 55%, hairline-mid:text 32%, hairline-lo:border">`, '<Part name="KERNEL" file="hairline-hairline-create/kernel.js" />', '<Part name="FIGURE">', code, '</Part>', '</Frame>', '```'].join('\n');
+            if (faults.length > 0 && before === 0) {
+                kept?.set('unshown', block);
+                return { content: [`Not shown yet. validate found ${faults.length} to fix in hairline-${name}.html:`, ...faults, 'Fix these in the figure and call hairline_build again with the whole file.'].join('\n'), failed: 'failed' };
+            }
+            kept?.delete('unshown');
+            show(block);
             return { content: faults.length > 0
                 ? [`Built hairline-${name}.html and showed it to the user in the chat, with ${faults.length} still to fix:`, ...faults, 'Tell the user what is still wrong. You cannot see the page from here.'].join('\n')
                 : `Built hairline-${name}.html and showed it to the user in the chat. validate: ok, the figure passes the static checks. You cannot see the page from here, so the look has not been done.` };
@@ -2844,8 +2860,10 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
 
                 messages.push({ role: 'assistant', content: said, tool_calls: calls });
                 let ended = false;
+                const offered = [...(searching ? SEARCH_TOOLS.map((tool) => tool.function.name) : []), ...chatTools.map((tool) => tool.fn)];
                 for (const call of calls) {
-                    const name = String(call.function?.name || '');
+                    const asked = String(call.function?.name || '');
+                    const name = offered.includes(asked) || chatTools.some((tool) => tool.knows?.(asked)) ? asked : (nearestFunction(asked, offered) || asked);
                     // A small model sometimes calls a skill by its own name instead of through the function that opens it.
                     const real = chatTools.find((tool) => tool.fn === name);
                     const opener = real || SEARCH_TOOLS.some((tool) => tool.function.name === name) ? null : chatTools.find((tool) => tool.knows?.(name));
@@ -2858,7 +2876,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     write({ type: 'tool', tool: step.tool, input });
                     // Stop does not wait for a tool that is still running: a search, a page being read, a question to the person.
                     const outcome = await Promise.race([
-                        mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show, kept }) : runSearchTool(name, input),
+                        mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show, kept })
+                            : offered.includes(name) ? runSearchTool(name, input)
+                                : { content: `There is no function called ${clip(name, 60)}. The functions you can call are: ${offered.join(', ')}.`, failed: 'failed' },
                         stopSignal.then(() => ({ content: 'The reply was stopped.', failed: 'refused' }))
                     ]);
                     if (outcome.failed) {
@@ -2878,6 +2898,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     write({ type: 'token', text: '\n\n' });
                 }
             }
+            // Something a function held back for mending, and the model never came back to, is shown as it was.
+            if (kept.has('unshown') && !gone) show(kept.get('unshown'));
         } catch (error) {
             if (gone) reply.stopped = true;
             else {

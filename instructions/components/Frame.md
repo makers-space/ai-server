@@ -50,7 +50,7 @@ That takes page.html from the skill some-skill, puts the skill's engine.js where
 | height | a CSS length with its unit, such as 520px | How tall the frame is. Default 520px. It is always as wide as the reply, and the page scrolls inside it when it is taller. |
 | title | text | A name for the frame, read out by screen readers. It is not shown. |
 | template | skill/file, such as some-skill/page.html | One of a skill's files, used as the page. Its `/*NAME*/` markers are filled by the Parts. Without it, the text between the tags is the page. |
-| palette | pairs such as "ground:background, ink:text, faint:text 60%" | For a template that has colour variables of its own: gives each one a colour of the app's theme. Each pair is the template's variable (without the two dashes) and one of background, surface, text, border, primary, secondary, tertiary, neutral, success, warning, error, contrast, optionally followed by a strength from 1% to 100%. |
+| palette | pairs such as "ground:background, ink:text, faint:text 60%" | For a template that has colour variables of its own: gives each one a colour of the app's theme. Each pair is the template's variable (without the two dashes) and one of background, surface, text, border, primary, secondary, tertiary, neutral, success, warning, error, contrast, optionally followed by a strength from 1% to 100%. A page given a palette also has its buttons and sliders drawn in the app's look, and a switch of its own between light and dark is hidden, since the app's theme decides that. |
 
 | Tag | Attributes | What it does on screen |
 |---|---|---|
