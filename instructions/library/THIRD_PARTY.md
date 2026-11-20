@@ -2,7 +2,7 @@
 
 The skills in the `library` folder are taken from the projects below. Each skill file names its project in its `source` line and its licence in its `licence` line.
 
-What Mollama changes: the header of each file is rewritten to a short form (name, description, source, licence, and what the skill needs), and when a skill is sent to a model a line naming the skill is put before it. The body of each skill is unchanged. Only the main skill file of each skill is included; the scripts and reference files that some skills ship with are not, except where a project's section below says so.
+What Mollama changes: the header of each file is rewritten to a short form (name, description, source, licence, and what the skill needs), and when a skill is sent to a model a line naming the skill is put before it. The body of each skill is unchanged. A skill's own files (its reference pages, examples, templates and scripts) sit unchanged in a folder named after the skill, beside its page, text files only, as each project's section below says. Mollama serves them for a model to read and runs none of them.
 
 ## anthropics/skills
 
@@ -10,17 +10,23 @@ https://github.com/anthropics/skills
 
 18 skills, in `anthropic`. Licence: Apache License 2.0. Written by Anthropic.
 
+The files of each skill's folder are included, copied unchanged at commit e4bb5d960d87.
+
 ## mattpocock/skills
 
 https://github.com/mattpocock/skills
 
 39 skills, in `engineering`. Licence: MIT. Copyright (c) 2026 Matt Pocock.
 
+The files of each skill's folder are included, copied unchanged at commit abeeaf95660b.
+
 ## coreyhaines31/marketingskills
 
 https://github.com/coreyhaines31/marketingskills
 
 53 skills, in `marketing`. Licence: MIT. Copyright (c) 2025 Corey Haines.
+
+The files of each skill's folder are included, copied unchanged at commit 5b2b400eec1e; for the 26 skills whose page has changed since it was taken in, from the earlier commit whose page matches Mollama's copy word for word.
 
 ## Open-Medica/open-medical-skills
 
@@ -34,11 +40,15 @@ https://github.com/davekilleen/dex
 
 112 skills, in `dex`. Licence: MIT. Copyright (c) 2026 Dave Killeen.
 
+The files of each skill's folder are included, copied unchanged at commit a74e5cc8b7f0. Files a skill names outside its own folder are not.
+
 ## upstash/context7
 
 https://github.com/upstash/context7
 
 3 skills, in `context7`. Licence: MIT. Copyright (c) 2021 Upstash, Inc..
+
+The files of each skill's folder are included, copied unchanged at commit b1e3611e32a8.
 
 ## mvanhorn/last30days-skill
 
@@ -46,11 +56,15 @@ https://github.com/mvanhorn/last30days-skill
 
 1 skills, in `last30days`. Licence: MIT. Copyright (c) 2026 Matt Van Horn.
 
+The files of its folder are included, copied unchanged from commit 972aa54ce099, whose page matches Mollama's copy word for word.
+
 ## wheresryan22/anatomy
 
 https://github.com/wheresryan22/anatomy
 
 1 skills, in `anatomy`. Licence: MIT. Copyright (c) 2026 Ryan.
+
+Its `examples`, `kit`, `references` and `scripts` folders are included, copied unchanged from a copy of the project whose page matches Mollama's word for word. The example pages its build scripts write are left out.
 
 ## lucasmarkes/hairline
 
@@ -277,7 +291,7 @@ https://github.com/Leonxlnx/taste-skill
 
 1 skills, in `taste`. Licence: MIT. Copyright (c) 2026 Leonxlnx.
 
-Taken from `skills/taste-skill/SKILL.md` at commit f6b7657 (tasteskill 2.5.1). The files its instructions name (`assets`, `library`, `references`, `scripts`; about 1,600 files) and its Stop hook are not included, so it is marked as needing files and commands.
+Taken from `skills/taste-skill/SKILL.md` at commit f6b7657 (tasteskill 2.5.1). Its `library`, `references` and `scripts` folders and the two pages of `assets` its instructions name are included, copied unchanged at the same commit. The rest of `assets` (about 1,600 files) and its Stop hook are not.
 
 ## xronocode/rich-md-skill
 

@@ -1601,7 +1601,7 @@ const readGuide = (file) => {
 };
 // A skill may come with files of its own: the reference pages, examples and code its instructions name. They sit in a
 // folder named after the skill, beside its page, exactly as their project ships them. Only text files are kept.
-const SKILL_FILE_TYPES = /\.(md|txt|js|mjs|cjs|ts|tsx|jsx|json|html|css|svg|py|sh|ya?ml|csv)$/i;
+const SKILL_FILE_TYPES = /\.(md|txt|js|mjs|cjs|ts|tsx|jsx|json|html|css|svg|py|rb|sh|ya?ml|csv)$/i;
 const MAX_SKILL_FILE_CHARS = 120000;
 const skillFilesIn = (folder, base = '') => (fs.existsSync(folder) ? fs.readdirSync(folder, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
     if (entry.isDirectory()) return skillFilesIn(path.join(folder, entry.name), `${base}${entry.name}/`);
