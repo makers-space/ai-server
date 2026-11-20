@@ -12,7 +12,7 @@ import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
-    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, MAX_PROGRAM_SECONDS, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
+    GenerationQueue, estimateTokens, extractText, createFilesClient, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, MAX_PROGRAM_SECONDS, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
@@ -2199,20 +2199,23 @@ const SKILL_FUNCTIONS = {
         }
     }]
 };
-// What the Hairline kit's own validate.mjs says of a figure. With the skill runner set up, the kit's two commands are
-// run there as the skill writes them: build.mjs puts the figure on the bench and validate.mjs checks that page. The
-// runner is given a short while to answer, since a figure should not wait on a service that is waking up; when it is
-// not set up, does not answer in time or fails, the checks kept here (hairlineFaults) are made instead.
-const HAIRLINE_WAIT = 20000;
+// What the Hairline kit's own validate.mjs says of a figure. With sandboxes set up, the kit's two commands run in one as
+// the skill writes them: build.mjs puts the figure on the bench and validate.mjs checks that page. A figure should not
+// wait long on a sandbox starting, so when sandboxes are not set up, the job takes longer than HAIRLINE_WAIT or it fails,
+// the checks kept here (hairlineFaults) are made instead.
+const HAIRLINE_WAIT = 30000;
+const HAIRLINE_JOB = 'node /root/skills/hairline-create/build.mjs figure.js page.html >/dev/null 2>&1 || exit 3\nnode /root/skills/hairline-create/validate.mjs page.html';
+let hairlineWait = HAIRLINE_WAIT;
+export const setHairlineWait = (ms) => {
+    hairlineWait = ms ?? HAIRLINE_WAIT;
+};
 const hairlineChecks = async (code) => {
-    if (!skillRunnerReady()) return hairlineFaults(code);
+    if (!sandboxReady()) return hairlineFaults(code);
     try {
-        const figure = { path: 'figure.js', data: Buffer.from(`${code}\n`).toString('base64') };
-        const built = await runSkillScript({ skill: 'hairline-create', script: 'build.mjs', args: ['figure.js', 'page.html'], files: [figure] }, HAIRLINE_WAIT);
-        const page = (built.files || []).find((file) => file.path === 'page.html');
-        if (built.exitCode !== 0 || !page) return hairlineFaults(code);
-        const checked = await runSkillScript({ skill: 'hairline-create', script: 'validate.mjs', args: ['page.html'], files: [page] }, HAIRLINE_WAIT);
-        if (checked.timedOut || ![0, 1].includes(checked.exitCode)) return hairlineFaults(code);
+        const job = runInSandbox({ language: 'bash', seconds: 60, files: [{ path: 'figure.js', buffer: Buffer.from(`${code}\n`) }], code: HAIRLINE_JOB });
+        job.catch(() => {});
+        const checked = await Promise.race([job, new Promise((resolve) => { setTimeout(() => resolve(null), hairlineWait).unref?.(); })]);
+        if (!checked || checked.timedOut || ![0, 1].includes(checked.exitCode)) return hairlineFaults(code);
         // It prints one line for each thing to fix and then a count, as errors, or a single line starting "ok".
         if (checked.exitCode === 0) return [];
         const said = `${checked.stderr || ''}\n${checked.stdout || ''}`.split('\n').map((line) => line.trim()).filter((line) => line && !/^\d+ to fix in /.test(line));
@@ -2255,10 +2258,6 @@ const explainerBlock = (page, title) => {
     return ['```component', `<Frame height="720px" title="${title}" palette="${EXPLAINER_PALETTE}">`, text, ...parts, '</Frame>', '```'].join('\n');
 };
 
-// The office skills' own scripts run on the skill runner, on files from the person's FilesystemOne, and what a script
-// makes is saved back there. Only a script that ships with the skill is run, never code a model writes, so these
-// skills still say "Guidance only": the parts that have the model write its own program are not done here.
-const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'marketing-conversion-tracking': 'conversion-tracking' };
 // The skills whose own files are in the sandbox snapshot, by their folder there (/root/skills/<folder>). With sandboxes
 // set up, these lack nothing: their commands run, as programs a model writes, beside their files.
 const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy', 'explainer-visual-explainer': 'visual-explainer', 'cadsmith-make-model': 'cadsmith', 'cadsmith-make-mechanism': 'cadsmith', 'cadsmith-edit-model': 'cadsmith', 'cadsmith-export-model': 'cadsmith' };
@@ -2310,45 +2309,6 @@ const saveFolder = (input, paths) => {
 const touchesFiles = (input) => (Array.isArray(input?.files) && input.files.some((one) => String(one).trim())) || Boolean(String(input?.save_to ?? '').trim());
 const filesParameter = { type: 'array', items: { type: 'string' }, description: 'FilesystemOne paths of the files it works on, such as /docs/report.docx' };
 const saveParameter = { type: 'string', description: 'The FilesystemOne folder for the files it makes. Left out, the folder of the first file.' };
-const runnerFunction = (kind) => ({
-    name: `${kind.replace(/-/g, '_')}_script`,
-    label: `${kind} script`,
-    doing: 'Running the script…',
-    changes: touchesFiles,
-    description: `Runs one of the ${kind} skill's own scripts, as the skill writes it (\`python scripts/...\` or \`node scripts/...\`), on files from the user's FilesystemOne. Give the script's path inside the skill, its arguments, and the FilesystemOne path of every file it works on: each is put in an empty folder under its own file name, so name it that way in the arguments. Files the script makes or changes are saved to save_to, or beside the first file. Only the skill's own scripts run; a script that needs LibreOffice or poppler fails and says so, and a program you write yourself cannot be run here.`,
-    parameters: {
-        type: 'object',
-        properties: {
-            script: { type: 'string', description: 'The script as the skill names it, such as scripts/office/validate.py' },
-            args: { type: 'array', items: { type: 'string' }, description: 'The arguments, in order, each as one piece of text' },
-            files: { ...filesParameter, description: 'FilesystemOne paths of the files the script works on, such as /docs/report.docx' },
-            save_to: { ...saveParameter, description: 'The FilesystemOne folder for the files the script makes. Left out, the folder of the first file.' }
-        },
-        required: ['script']
-    },
-    run: async (input) => {
-        const script = String(input?.script || '').trim().replace(/^(?:python3?|node)\s+/, '');
-        const args = Array.isArray(input?.args) ? input.args.map(String) : [];
-        const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
-        const folder = saveFolder(input, paths);
-        if (!script) return { content: 'Nothing was run. Name the script as the skill writes it, such as scripts/office/validate.py.', failed: 'failed' };
-        const files = personFiles();
-        let sent;
-        try {
-            sent = (await readPersonFiles(files, paths)).map((file) => ({ path: file.path, data: file.buffer.toString('base64') }));
-        } catch {
-            return { content: `Nothing was run. A file could not be read from the user's FilesystemOne: ${paths.join(', ')}. Check the path with them.`, failed: 'failed' };
-        }
-        let answer;
-        try {
-            answer = await runSkillScript({ skill: kind, script, args, files: sent });
-        } catch (error) {
-            return { content: `Nothing was run. ${error.message}`, failed: 'failed' };
-        }
-        const made = (answer.files || []).slice(0, 40).map((one) => ({ path: one.path, buffer: Buffer.from(one.data, 'base64') }));
-        return reportRun([script, ...args].join(' '), answer, await savePersonFiles(files, folder, made));
-    }
-});
 // A program the model writes, run in a sandbox: what most skills' commands come to, and what a skill that has the model
 // write its own build or check needs. One that reads or writes the person's files asks first.
 const MAX_PROGRAM_CHARS = 100000;
@@ -2417,7 +2377,7 @@ const asChatTool = (entry, shown) => ({
 });
 const skillFunctionsFor = (chat) => {
     const active = skillsOf(chat);
-    const own = active.flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []).filter((entry) => !entry.ready || entry.ready()), ...(RUNNER_SKILLS[skill.id] && skillRunnerReady() ? [runnerFunction(RUNNER_SKILLS[skill.id])] : [])].map((entry) => asChatTool(entry, () => skill.name)));
+    const own = active.flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []).filter((entry) => !entry.ready || entry.ready())].map((entry) => asChatTool(entry, () => skill.name)));
     const writes = sandboxReady() && active.some((skill) => SANDBOX_SKILLS[skill.id] || (skill.needs || []).includes('commands'));
     return writes ? [...own, asChatTool(programFunction(), (input) => `${['python', 'node', 'bash'].includes(input?.language) ? input.language : 'A'} program`)] : own;
 };

@@ -941,13 +941,6 @@ export const setFilesFetch = (replacement) => {
     filesFetch = replacement || realFetch;
 };
 
-// The skill runner is a separate service that runs a skill's own scripts; no script runs on this server. A request to
-// it is signed with a secret both sides hold. It is optional: without its address and secret no script function is offered.
-let runnerFetch = realFetch;
-export const setRunnerFetch = (replacement) => {
-    runnerFetch = replacement || realFetch;
-};
-export const skillRunnerReady = () => Boolean(process.env.SKILL_RUNNER_URL && process.env.SKILL_RUNNER_SECRET);
 // A program a model writes runs in a Render sandbox: a small computer of its own, started from the prepared snapshot
 // (mkrspc-python/prepare_sandbox.py), with no network, none of this server's settings, and thrown away when the job ends.
 // This server only holds the key that starts it. It is optional: without the three settings no program is run.
@@ -1067,27 +1060,6 @@ export const runInSandbox = async ({ language, code, files = [], seconds = 300, 
             await sandboxes.terminate(sandbox.id).catch(() => {});
         }
     }
-};
-
-export const runSkillScript = async (job, wait = 360000) => {
-    const raw = JSON.stringify(job);
-    const stamp = String(Date.now());
-    const signature = crypto.createHmac('sha256', process.env.SKILL_RUNNER_SECRET).update(`${stamp}.${raw}`).digest('hex');
-    let response;
-    try {
-        response = await runnerFetch(`${String(process.env.SKILL_RUNNER_URL).replace(/\/+$/, '')}/run`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Runner-Timestamp': stamp, 'X-Runner-Signature': signature },
-            body: raw,
-            signal: AbortSignal.timeout(wait)
-        });
-    } catch {
-        throw new Error('The skill runner could not be reached. It may be waking up; try again in a minute.');
-    }
-    const body = await response.json().catch(() => ({}));
-    if (response.status === 400 || response.status === 404 || response.status === 413) throw new Error(String(body.detail || 'The skill runner refused the request.'));
-    if (!response.ok) throw new Error(`The skill runner answered with status ${response.status}.`);
-    return body;
 };
 
 let filesRetryMs = 3000;
