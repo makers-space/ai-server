@@ -1843,27 +1843,27 @@ const saveToFilesTool = () => ({
     label: SAVE_STEP,
     doing: 'Saving to your files…',
     changes: true,
-    shown: (input) => clip(`${String(input?.folder ?? '').replace(/\/+$/, '')}/${String(input?.name ?? '')}`, 160),
+    shown: (input) => clip(`${inHome(input?.folder)}/${String(input?.name ?? '')}`, 160),
     definition: {
         type: 'function',
         function: {
             name: 'save_to_files',
             description: "Save a file to the user's FilesystemOne: a page, a figure, a diagram's text, a table as CSV, code or notes you made (give content), or a picture, video or document you found on the web (give address). The user is asked first. A name already taken in that folder is not overwritten; the file is given a new name.",
-            parameters: { type: 'object', properties: { folder: { type: 'string', description: 'The folder, such as /Drawings' }, name: { type: 'string', description: 'The file name with its extension, such as engine.html' }, content: { type: 'string', description: 'The whole text of the file, when you made it' }, address: { type: 'string', description: 'The https address of a file on the web, when you found it' } }, required: ['folder', 'name'] }
+            parameters: { type: 'object', properties: { folder: { type: 'string', description: "The folder, such as /Drawings. It is put inside the user's own folder; the result says the full path to tell them." }, name: { type: 'string', description: 'The file name with its extension, such as engine.html' }, content: { type: 'string', description: 'The whole text of the file, when you made it' }, address: { type: 'string', description: 'The https address of a file on the web, when you found it' } }, required: ['folder', 'name'] }
         }
     },
     run: async (input) => {
-        const folder = String(input?.folder ?? '').trim();
         const name = String(input?.name ?? '').trim();
         const content = typeof input?.content === 'string' ? input.content : '';
         const address = String(input?.address ?? '').trim();
-        if (!folder.startsWith('/') || folder === '/' || !name || /[\\/\0]/.test(name)) return { content: 'Nothing was saved. Give a folder such as /Drawings (not the top level) and a file name with no slashes.', failed: 'failed' };
+        if (!String(input?.folder ?? '').trim() || !name || /[\\/\0]/.test(name)) return { content: 'Nothing was saved. Give a folder such as /Drawings and a file name with no slashes.', failed: 'failed' };
         if (!content && !address) return { content: 'Nothing was saved. Give the content of the file, or the address of a file on the web.', failed: 'failed' };
+        const folder = inHome(input.folder);
         const files = personFiles();
         try {
             if (address) {
                 await files.upload(folder, [{ path: name, buffer: await readAddress(address) }]);
-                return { content: `Saved the file from ${clip(address, 200)} to ${folder.replace(/\/+$/, '')}/${name}. If that name was taken, it was given a new one.` };
+                return { content: `Saved the file from ${clip(address, 200)} to ${folder}/${name}. If that name was taken, it was given a new one.` };
             }
             const saved = await files.save(folder, name, content);
             return { content: `Saved to ${saved.path}.` };
@@ -2262,9 +2262,18 @@ const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'ant
 // The skills whose own files are in the sandbox snapshot, by their folder there (/root/skills/<folder>). With sandboxes
 // set up, these lack nothing: their commands run, as programs a model writes, beside their files.
 const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy', 'explainer-visual-explainer': 'visual-explainer', 'cadsmith-make-model': 'cadsmith', 'cadsmith-make-mechanism': 'cadsmith', 'cadsmith-edit-model': 'cadsmith', 'cadsmith-export-model': 'cadsmith' };
-// Whose files a reply may reach: the sign-in of the person who sent the message.
+// Whose files a reply may reach: the sign-in of the person who sent the message, and their home folder.
 const filesScope = new AsyncLocalStorage();
-const personFiles = () => createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore() });
+const personFiles = () => createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore()?.token });
+// A person's files live in /<username>; a folder made anywhere else is one they never see. A folder a model names is put
+// inside their home folder unless it is already there or holds one of the files it was given (such as a shared one).
+const inHome = (folder, given = []) => {
+    const home = filesScope.getStore()?.home;
+    const clean = `/${String(folder || '').split('/').filter((part) => part && part !== '.' && part !== '..').join('/')}`;
+    if (!home || clean === home || clean.startsWith(`${home}/`)) return clean;
+    if (given.some((one) => path.posix.dirname(String(one)) === clean)) return clean;
+    return clean === '/' ? home : `${home}${clean}`;
+};
 const readPersonFiles = async (files, paths) => {
     const read = [];
     for (const one of paths) {
@@ -2293,6 +2302,11 @@ const reportRun = (title, answer, saved) => {
 };
 // A call touches the person's files only when it names files to send or a folder to save into: with neither, nothing
 // of theirs is read and what it makes is not saved, so it runs without asking.
+const saveFolder = (input, paths) => {
+    const named = String(input?.save_to ?? '').trim();
+    if (named) return inHome(named, paths);
+    return paths[0] ? path.posix.dirname(paths[0]) : '';
+};
 const touchesFiles = (input) => (Array.isArray(input?.files) && input.files.some((one) => String(one).trim())) || Boolean(String(input?.save_to ?? '').trim());
 const filesParameter = { type: 'array', items: { type: 'string' }, description: 'FilesystemOne paths of the files it works on, such as /docs/report.docx' };
 const saveParameter = { type: 'string', description: 'The FilesystemOne folder for the files it makes. Left out, the folder of the first file.' };
@@ -2316,7 +2330,7 @@ const runnerFunction = (kind) => ({
         const script = String(input?.script || '').trim().replace(/^(?:python3?|node)\s+/, '');
         const args = Array.isArray(input?.args) ? input.args.map(String) : [];
         const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
-        const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
+        const folder = saveFolder(input, paths);
         if (!script) return { content: 'Nothing was run. Name the script as the skill writes it, such as scripts/office/validate.py.', failed: 'failed' };
         const files = personFiles();
         let sent;
@@ -2364,7 +2378,7 @@ const programFunction = () => ({
         const minutes = Number.isFinite(Number(input?.minutes)) ? Math.min(Math.max(Math.round(Number(input.minutes)), 1), MAX_PROGRAM_SECONDS / 60) : 5;
         const code = String(input?.code ?? '');
         const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
-        const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
+        const folder = saveFolder(input, paths);
         if (!language) return { content: 'Nothing was run. Say what the program is written in: python, node or bash.', failed: 'failed' };
         if (!code.trim()) return { content: 'Nothing was run. Give the whole program in code.', failed: 'failed' };
         if (code.length > MAX_PROGRAM_CHARS) return { content: `Nothing was run. A program may be at most ${MAX_PROGRAM_CHARS.toLocaleString('en-GB')} characters.`, failed: 'failed' };
@@ -3499,7 +3513,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
     if (!chat) return;
     const target = await chatTarget(req, chat);
     deviceScope.enterWith(target);
-    filesScope.enterWith(req.cookies?.accessToken);
+    filesScope.enterWith({ token: req.cookies?.accessToken, home: req.user?.username ? `/${req.user.username}` : null });
     if (!chat.device && target.kind === 'companion') chat.device = target.id;
     if (!busyChats.has(chat.id)) return takeTurns(chat, req.body, req.user.id, res);
     if (req.body.regenerate || req.body.editIndex !== undefined) {
