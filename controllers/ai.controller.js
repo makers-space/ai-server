@@ -1742,6 +1742,54 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
     };
 }));
 export const SKILLS = [...OWN_SKILLS, ...LIBRARY_SKILLS];
+// Which skills go together, read from what the skills themselves say, the way notes link by naming each other: no
+// model is asked and nothing is downloaded. A skill counts as named when it is written as one: `slug`, a /slug
+// command, "the Copywriting skill", or a longer name in a list of skills. A one-word name is also an ordinary word,
+// so it needs one of the first three forms, and a name of three letters or fewer one of the first two. The skill
+// map's combining guide adds the pairs it names. Each skill keeps its strongest links.
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const SKILL_LINK_LIMIT = 6;
+export const skillLinks = (all, guide = '') => {
+    const slugOf = (skill) => (skill.source && skill.id.startsWith(`${skill.source}-`) ? skill.id.slice(skill.source.length + 1) : skill.id);
+    const finders = all.map((skill) => {
+        const slug = slugOf(skill);
+        const names = [...new Set([skill.name, slug, slug.replace(/-/g, ' ')].filter((word) => word.length >= 4))].map(escapeRe);
+        const res = [new RegExp(`\`/?${escapeRe(slug)}\``, 'i'), new RegExp(`(?<![\\w/.:-])/${escapeRe(slug)}(?=[\\s.,;:)]|$)`, 'i')];
+        if (names.length > 0) {
+            const either = `(?:${names.join('|')})`;
+            res.push(new RegExp(`(?<![\\w-])${either}(?![\\w-])[\`*"'’”]?\\s+skill\\b`, 'i'));
+            if (/[\s-]/.test(skill.name) || slug.includes('-')) res.push(new RegExp(`\\bskills?\\b[^.\\n]{0,60}?(?<![\\w-])${either}(?![\\w-])`, 'i'));
+        }
+        return { skill, res };
+    });
+    const links = new Map(all.map((skill) => [skill.id, new Map()]));
+    const nameOf = new Map(all.map((skill) => [skill.id, skill.name.toLowerCase()]));
+    const add = (a, b, weight = 1) => {
+        if (a === b || nameOf.get(a) === nameOf.get(b)) return;
+        links.get(a).set(b, (links.get(a).get(b) || 0) + weight);
+        links.get(b).set(a, (links.get(b).get(a) || 0) + weight);
+    };
+    for (const skill of all) {
+        const prose = String(skill.text || '').replace(/^---\n[\s\S]*?\n---\n/, '').replace(/```[\s\S]*?```/g, ' ');
+        for (const { skill: other, res } of finders) if (other.id !== skill.id && res.some((re) => re.test(prose))) add(skill.id, other.id);
+    }
+    // The guide is Mollama's own, so a name written with its capitals is meant: every pair in a paragraph is linked.
+    for (const paragraph of String(guide).split(/\n\s*\n/)) {
+        const named = all.filter((skill) => skill.name.length >= 6 && new RegExp(`(?<![\\w-])${escapeRe(skill.name)}(?![\\w-])`).test(paragraph));
+        named.forEach((one, at) => named.slice(at + 1).forEach((other) => add(one.id, other.id, 2)));
+    }
+    const sourceOf = new Map(all.map((skill) => [skill.id, skill.source]));
+    const same = (id, other) => (sourceOf.get(other) === sourceOf.get(id) ? 1 : 0);
+    return new Map([...links].map(([id, found]) => [id, [...found].sort((x, y) => y[1] - x[1] || same(id, y[0]) - same(id, x[0])).slice(0, SKILL_LINK_LIMIT).map(([other]) => other)]));
+};
+const COMBINING_GUIDE = (() => {
+    try {
+        return fs.readFileSync(path.join(INSTRUCTIONS, 'skills', 'skill-map', 'examples', 'combining.md'), 'utf8').replace(/\r\n/g, '\n');
+    } catch {
+        return '';
+    }
+})();
+const SKILL_LINKS = skillLinks(LIBRARY_SKILLS, COMBINING_GUIDE);
 // A skill is one to eight thousand tokens of instructions, so a chat holds only a few at once.
 export const MAX_CHAT_SKILLS = 8;
 // Short skills that need no commands or files and work as a conversation, so a small model can follow them.
@@ -1781,7 +1829,21 @@ const sortSkills = (chat, listing) => {
     const full = active.filter((skill) => skill.source === 'mollama' || opened.has(skill.name));
     return { full, listed: active.filter((skill) => !full.includes(skill)) };
 };
-const openSkillTool = (listed) => {
+// The skills an opened skill goes with, so a model knows its companions without searching for them.
+const SKILL_BY_ID = new Map(SKILLS.map((skill) => [skill.id, skill]));
+const companionsOf = (skill, others) => {
+    const off = new Set(others.map((one) => one.id));
+    const linked = (SKILL_LINKS.get(skill.id) || []).map((id) => SKILL_BY_ID.get(id)).filter(Boolean);
+    if (linked.length === 0) return '';
+    const on = linked.filter((one) => !off.has(one.id)).map((one) => one.name);
+    const away = linked.filter((one) => off.has(one.id)).map((one) => one.name);
+    return [
+        `\n\nGOES WITH`,
+        ...(on.length > 0 ? [`On in this chat, open with open_skill when the request needs it: ${on.join(', ')}.`] : []),
+        ...(away.length > 0 ? [`In the library, not on: ${away.join(', ')}. When one would help, tell the user its name; they turn it on under Skills.`] : [])
+    ].join('\n');
+};
+const openSkillTool = (listed, others = []) => {
     const find = (input) => {
         const wanted = String(input?.skill ?? '').trim().toLowerCase();
         return listed.find((skill) => skill.name.toLowerCase() === wanted || skill.id === wanted);
@@ -1803,7 +1865,7 @@ const openSkillTool = (listed) => {
         },
         run: async (input) => {
             const skill = find(input);
-            return skill ? { content: skill.text } : { content: `There is no skill by that name in this chat. The skills are: ${listed.map((one) => one.name).join(', ')}.`, failed: 'failed' };
+            return skill ? { content: `${skill.text}${companionsOf(skill, others)}` } : { content: `There is no skill by that name in this chat. The skills are: ${listed.map((one) => one.name).join(', ')}.`, failed: 'failed' };
         }
     };
 };
@@ -2530,7 +2592,19 @@ const findSkillTool = (others) => ({
     run: async (input) => {
         const found = rankSkills(others, input?.query);
         if (found.length === 0) return { content: 'No skill in the library matches. Answer without one.' };
-        const lines = found.map((skill) => `- ${skill.name} (${SKILL_SOURCES[skill.source]?.name || skill.source}): ${skill.description}`);
+        // The skills the best matches go with come too, one step out, as a note-taking app shows a page's links.
+        const offered = new Set(others.map((skill) => skill.id));
+        const shown = new Set(found.map((skill) => skill.id));
+        const along = [];
+        for (const skill of found.slice(0, 2)) {
+            for (const id of SKILL_LINKS.get(skill.id) || []) {
+                if (along.length >= 3 || shown.has(id) || !offered.has(id)) continue;
+                shown.add(id);
+                along.push({ skill: SKILL_BY_ID.get(id), with: skill.name });
+            }
+        }
+        const line = (skill) => `- ${skill.name} (${SKILL_SOURCES[skill.source]?.name || skill.source}): ${skill.description}`;
+        const lines = [...found.map(line), ...along.map((one) => `${line(one.skill)} Goes with ${one.with}.`)];
         return { content: ['These skills are not turned on in this chat. Tell the user by name which one would help and that they can turn it on under Skills, then answer as well as you can without it.', ...lines].join('\n') };
     }
 });
@@ -3234,7 +3308,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const draws = drawsComponents(chat);
         // A skill that is only on by default offers its files once the model has opened it.
         const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0 && (Array.isArray(chat.skills) || skill.default !== 'tools' || !listed.includes(skill))) : [];
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(process.env.FILESYSTEM_ONE_URL ? [listFilesTool(), readFileTool(), saveToFilesTool()] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed, others)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(process.env.FILESYSTEM_ONE_URL ? [listFilesTool(), readFileTool(), saveToFilesTool()] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
