@@ -964,17 +964,53 @@ const sandboxesOf = async () => {
 const PROGRAM_RUNS = { python: ['python', 'py'], node: ['node', 'js'], bash: ['bash', 'sh'] };
 const SANDBOX_FILES = 40;
 const SANDBOX_BYTES = 25 * 1024 * 1024;
+// A sandbox kept for one chat between its programs, so files one run leaves are there for the next: let go after
+// KEEP_IDLE_MS with nothing run, and never kept past KEEP_LIFE_SECONDS. A job that may reach the network is never kept.
+let keepIdleMs = 10 * 60 * 1000;
+const KEEP_LIFE_SECONDS = 2 * 60 * 60;
+export const MAX_PROGRAM_SECONDS = 30 * 60;
+const keptSandboxes = new Map();
+const letSandboxGo = async (key) => {
+    const held = keptSandboxes.get(key);
+    if (!held) return;
+    keptSandboxes.delete(key);
+    clearTimeout(held.timer);
+    await (await sandboxesOf()).terminate(held.id).catch(() => {});
+};
+// For tests: how long a kept sandbox waits, and letting every kept one go now.
+export const setSandboxKeepMs = (ms) => {
+    keepIdleMs = ms ?? 10 * 60 * 1000;
+};
+export const releaseSandboxes = async () => {
+    for (const key of [...keptSandboxes.keys()]) await letSandboxGo(key);
+};
 // The network is shut unless a job names the few addresses it may reach.
-export const runInSandbox = async ({ language, code, files = [], seconds = 300, allow = [] }) => {
+export const runInSandbox = async ({ language, code, files = [], seconds = 300, allow = [], keep = null }) => {
     const [command, ending] = PROGRAM_RUNS[language] || PROGRAM_RUNS.python;
     const sandboxes = await sandboxesOf();
     const networkPolicy = allow.length > 0 ? { type: 'allow-list', rules: allow.map((domain) => ({ domain })) } : { type: 'deny-all' };
-    let sandbox;
-    try {
-        sandbox = await sandboxes.create({ snapshotName: process.env.SANDBOX_SNAPSHOT, networkPolicy, timeoutSeconds: 900, idleTimeoutSeconds: 300, wait: { timeoutMs: 120000 } });
-    } catch (error) {
-        throw new Error(`A sandbox could not be started: ${String(error?.message || error).slice(0, 200)}`);
+    const runFor = Math.min(Math.max(Math.round(seconds), 30), MAX_PROGRAM_SECONDS);
+    const keeping = Boolean(keep) && allow.length === 0;
+    const start = async () => {
+        try {
+            return await sandboxes.create({ snapshotName: process.env.SANDBOX_SNAPSHOT, networkPolicy, timeoutSeconds: keeping ? KEEP_LIFE_SECONDS : Math.max(900, runFor + 300), idleTimeoutSeconds: keeping ? 900 : 300, wait: { timeoutMs: 120000 } });
+        } catch (error) {
+            throw new Error(`A sandbox could not be started: ${String(error?.message || error).slice(0, 200)}`);
+        }
+    };
+    const held = keeping ? keptSandboxes.get(keep) : null;
+    let sandbox = null;
+    let createdAt = Date.now();
+    let fresh = true;
+    if (held && Date.now() + (runFor + 120) * 1000 < held.createdAt + KEEP_LIFE_SECONDS * 1000) {
+        clearTimeout(held.timer);
+        sandbox = { id: held.id };
+        createdAt = held.createdAt;
+        fresh = false;
+    } else if (held) {
+        await letSandboxGo(keep);
     }
+    if (!sandbox) sandbox = await start();
     try {
         const exec = async (line) => {
             let stdout = '';
@@ -987,11 +1023,22 @@ export const runInSandbox = async ({ language, code, files = [], seconds = 300, 
             }
             return { stdout, stderr, exitCode };
         };
-        await exec('mkdir -p /root/work /root/job');
+        // A kept sandbox may have been closed meanwhile; then a new one is started and the earlier files are gone.
+        try {
+            await exec('mkdir -p /root/work /root/job');
+        } catch (error) {
+            if (fresh) throw error;
+            keptSandboxes.delete(keep);
+            await sandboxes.terminate(sandbox.id).catch(() => {});
+            sandbox = await start();
+            createdAt = Date.now();
+            fresh = true;
+            await exec('mkdir -p /root/work /root/job');
+        }
         for (const file of files) await sandboxes.upload(sandbox.id, `/root/work/${file.path}`, file.buffer);
         await sandboxes.upload(sandbox.id, `/root/job/main.${ending}`, Buffer.from(code));
         await exec('touch /root/job/.start');
-        const ran = await exec(`cd /root/work && export HOME=/root PATH=/root/env/bin:$PATH NODE_PATH=/root/node/node_modules && timeout -k 5 ${seconds} ${command} /root/job/main.${ending}`);
+        const ran = await exec(`cd /root/work && export HOME=/root PATH=/root/env/bin:$PATH NODE_PATH=/root/node/node_modules && timeout -k 5 ${runFor} ${command} /root/job/main.${ending}`);
         const listed = await exec(`cd /root/work && find . -type f -newer /root/job/.start | sed 's|^./||' | head -${SANDBOX_FILES + 1}`);
         const made = [];
         let size = 0;
@@ -1010,9 +1057,15 @@ export const runInSandbox = async ({ language, code, files = [], seconds = 300, 
             size += buffer.length;
             made.push({ path, buffer });
         }
-        return { exitCode: ran.exitCode, timedOut: ran.exitCode === 124 || ran.exitCode === 137, stdout: ran.stdout, stderr: ran.stderr, files: made, skipped };
+        return { exitCode: ran.exitCode, timedOut: ran.exitCode === 124 || ran.exitCode === 137, stdout: ran.stdout, stderr: ran.stderr, files: made, skipped, kept: keeping, fresh: keeping && Boolean(held) && fresh };
     } finally {
-        await sandboxes.terminate(sandbox.id).catch(() => {});
+        if (keeping) {
+            const timer = setTimeout(() => { letSandboxGo(keep); }, keepIdleMs);
+            timer.unref?.();
+            keptSandboxes.set(keep, { id: sandbox.id, createdAt, timer });
+        } else {
+            await sandboxes.terminate(sandbox.id).catch(() => {});
+        }
     }
 };
 

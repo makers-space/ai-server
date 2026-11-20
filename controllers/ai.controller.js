@@ -12,7 +12,7 @@ import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
-    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
+    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, MAX_PROGRAM_SECONDS, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
@@ -2345,7 +2345,7 @@ const programFunction = () => ({
     label: 'Program',
     doing: 'Running the program…',
     changes: touchesFiles,
-    description: `Runs a program you write in a computer of its own that has no network and is thrown away afterwards, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. The user is asked first only when it is given files or save_to; a program with neither, such as one that looks around or checks something, runs straight away. To see what you built, have the program take screenshots (chromium --headless --screenshot, or Playwright) and name them in look: they come back to you as pictures. Nothing is kept from one call to the next, so do the whole job in one program, which may run for up to five minutes.`,
+    description: `Runs a program you write in a computer of its own that has no network, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. The user is asked first only when it is given files or save_to; a program with neither, such as one that looks around or checks something, runs straight away. To see what you built, have the program take screenshots (chromium --headless --screenshot, or Playwright) and name them in look: they come back to you as pictures. The computer is kept for this chat between calls for ten minutes, so files a run leaves in its folder are there for the next run (you are told when a run had to start on a fresh one); only files made or changed in a run are saved or returned. A program runs for up to five minutes, or up to thirty when you set minutes.`,
     parameters: {
         type: 'object',
         properties: {
@@ -2353,12 +2353,14 @@ const programFunction = () => ({
             code: { type: 'string', description: 'The whole program' },
             files: filesParameter,
             save_to: saveParameter,
+            minutes: { type: 'integer', minimum: 1, maximum: 30, description: 'How long the program may run, in minutes. Five when left out.' },
             look: { type: 'array', items: { type: 'string' }, description: 'Pictures the program makes that you want to see, as paths in its folder, such as shots/front.png. They come back to you as images and are not saved to the user\'s files.' }
         },
         required: ['language', 'code']
     },
-    run: async (input) => {
+    run: async (input, { chat, userId } = {}) => {
         const language = ['python', 'node', 'bash'].includes(input?.language) ? input.language : null;
+        const minutes = Number.isFinite(Number(input?.minutes)) ? Math.min(Math.max(Math.round(Number(input.minutes)), 1), MAX_PROGRAM_SECONDS / 60) : 5;
         const code = String(input?.code ?? '');
         const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
         const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
@@ -2374,7 +2376,7 @@ const programFunction = () => ({
         }
         let answer;
         try {
-            answer = await runInSandbox({ language, code, files: given });
+            answer = await runInSandbox({ language, code, files: given, seconds: minutes * 60, keep: chat ? `${userId}:${chat.id}` : null });
         } catch (error) {
             return { content: `Nothing was run. ${error.message}`, failed: 'failed' };
         }
@@ -2382,6 +2384,7 @@ const programFunction = () => ({
         const look = (Array.isArray(input?.look) ? input.look.map((one) => String(one).trim().replace(/^\.?\//, '')) : []).filter(Boolean);
         const shots = (answer.files || []).filter((file) => look.includes(file.path) && LOOK_TYPES.test(file.path) && file.buffer.length <= MAX_LOOK_BYTES).slice(0, MAX_LOOKS);
         const report = reportRun(`The ${language} program`, answer, await savePersonFiles(files, folder, (answer.files || []).filter((file) => !look.includes(file.path))));
+        if (answer.fresh) report.content = `This run started on a fresh computer: the files earlier runs left are gone.\n\n${report.content}`;
         if (look.length === 0) return report;
         const missing = look.filter((one) => !shots.some((file) => file.path === one));
         const seen = [shots.length > 0 && `The pictures you asked to see are attached: ${shots.map((file) => file.path).join(', ')}.`, missing.length > 0 && `Not attached (not made, not a PNG, JPEG, WebP or GIF picture, over ${MAX_LOOK_BYTES / 1024 / 1024} MB, or past ${MAX_LOOKS} pictures): ${missing.join(', ')}.`].filter(Boolean).join(' ');
@@ -4349,7 +4352,7 @@ const runChatTool = async (tool, input, { chat, userId, write, stopped, show, ke
             if (answer === 'no') return { content: 'The person did not allow this tool to run. Do not try another way to do the same thing; say that it was not done.', failed: 'refused' };
             if (answer === 'always') chat.allowedTools = [...(chat.allowedTools || []), tool.fn];
         }
-        return await tool.run(input, { show, kept });
+        return await tool.run(input, { show, kept, chat, userId });
     } catch (error) {
         const code = mapOllamaError(error).code;
         logger.warn('[Chat] Tool failed', { tool: tool.fn, code });
