@@ -2804,6 +2804,7 @@ const presentChat = (chat, facts = null) => ({
     webSearch: chat.webSearch !== false,
     summary: chat.summary,
     memoryThrough: memoryStart(chat),
+    memory: memoryStart(chat) > 0 ? chat.memory : '',
     notes: (chat.notes || []).map((note) => ({ key: note.key, text: note.text, updatedAt: note.updatedAt })),
     continuedFrom: chat.continuedFrom,
     options: chat.options || {},
