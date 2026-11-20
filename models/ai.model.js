@@ -271,6 +271,12 @@ export const guideSchemas = {
     seen: Joi.object({ key: Joi.string().valid(...GUIDE_STEPS).required() })
 };
 
+const noteSchema = new mongoose.Schema({
+    key: { type: String, required: true, maxlength: 60 },
+    text: { type: String, required: true, maxlength: 2000 },
+    updatedAt: { type: Date, default: Date.now }
+}, { _id: false });
+
 const chatSchema = new mongoose.Schema({
     service: { type: String, default: SERVICE, immutable: true, index: true },
     owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -286,6 +292,11 @@ const chatSchema = new mongoose.Schema({
     allowedTools: { type: [String], default: undefined },
     webSearch: { type: Boolean, default: true },
     summary: { type: String, default: '' },
+    // A long chat's earlier messages folded into a memory: the model is sent the memory and the messages after it.
+    memory: { type: String, default: '' },
+    memoryThrough: { type: Number, default: 0 },
+    // Notes a model kept with save_note, sent with every message of the chat.
+    notes: { type: [noteSchema], default: [] },
     continuedFrom: { type: mongoose.Schema.Types.ObjectId, default: null },
     options: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
     messages: { type: [chatMessageSchema], default: [] },

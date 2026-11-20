@@ -1795,6 +1795,45 @@ const openSkillTool = (listed) => {
 };
 // The files of the skills a chat has on are read one at a time, when the skill's instructions send the model to one.
 // What the person is told a model is doing while it writes a call to a tool and while that tool runs.
+// Within one reply, a tool result the model has moved past is put away to save room: one from PUT_AWAY_AFTER steps
+// back or more, or any older than the last step once the prompt is past half the model's room. Pages that tell the
+// model how to work (skills, their files, component pages) stay. Calling the same function again with the same input
+// gives the whole result back.
+const KEPT_RESULTS = new Set(['open_skill', 'open_skill_file', 'open_component', 'find_skill', 'ask_user', 'save_note']);
+const PUT_AWAY_AFTER = 3;
+const PUT_AWAY_MIN_CHARS = 600;
+// A note the model keeps for the rest of the chat: shown with every message after this one, so it outlasts the memory
+// folding and results put away.
+const MAX_NOTES = 40;
+const NOTE_STEP = 'Note';
+const noteTool = (chat) => ({
+    fn: 'save_note',
+    label: NOTE_STEP,
+    doing: 'Keeping a note…',
+    changes: false,
+    shown: (input) => clip(String(input?.key ?? ''), 60),
+    definition: {
+        type: 'function',
+        function: {
+            name: 'save_note',
+            description: 'Keep a note in this chat: a fact, a number, a decision, a source or a step you will need later. Notes are shown to you with every message of this chat from now on, even after older messages are folded into a memory and tool results you have read are put away. A note with a key already used replaces it; empty text removes it.',
+            parameters: { type: 'object', properties: { key: { type: 'string', description: 'A short name for the note, such as battery-capacity' }, text: { type: 'string', description: 'What to keep, in a sentence or a few short lines. Empty to remove the note.' } }, required: ['key', 'text'] }
+        }
+    },
+    run: async (input) => {
+        const key = clip(String(input?.key ?? '').replace(/\s+/g, ' ').trim(), 60);
+        const text = clip(String(input?.text ?? '').trim(), 2000);
+        if (!key) return { content: 'Nothing was kept. Give the note a short key.', failed: 'failed' };
+        const others = (chat.notes || []).filter((note) => note.key !== key);
+        if (!text) {
+            chat.notes = others;
+            return { content: `Removed the note "${key}".` };
+        }
+        if (others.length >= MAX_NOTES) return { content: `Nothing was kept: this chat already has ${MAX_NOTES} notes. Remove one by saving it with empty text.`, failed: 'failed' };
+        chat.notes = [...others, { key, text, updatedAt: new Date() }];
+        return { content: `Kept the note "${key}". It is shown to you with every message of this chat from now on.` };
+    }
+});
 // A question for the person, shown with choices they can press. Asking ends the reply: their answer is the next message.
 const ASK_STEP = 'Question';
 const askUserTool = () => ({
@@ -1827,6 +1866,7 @@ const DOING = {
     read_web_page: 'Reading a web page…',
     open_skill: 'Opening a skill…',
     open_skill_file: "Reading one of a skill's files…",
+    save_note: 'Keeping a note…',
     open_component: 'Reading how to draw a component…',
     find_skill: 'Looking in the skill library…',
     calculator: 'Working out a sum…',
@@ -2684,12 +2724,20 @@ const shortenPages = (text) => String(text).replace(/```component\n(<Frame\b[^>]
     const title = (opening.match(/\btitle="([^"]*)"/) || [])[1] || 'a page';
     return `[Shown here: "${title}", a page of ${block.length.toLocaleString('en-GB')} characters, not repeated.]`;
 });
+// Rolling memory: once a chat uses more than ROLL_PERCENT of its context, its older messages are folded into a memory
+// after a reply, by the chat's own model, in the background. The last KEEP_MESSAGES are always sent word for word.
+// The person still sees every message; only what the model is sent is shorter.
+const ROLL_PERCENT = 60;
+const KEEP_MESSAGES = 6;
+const memoryStart = (chat) => (chat.memory && chat.memoryThrough > 0 && chat.memoryThrough <= chat.messages.length ? chat.memoryThrough : 0);
+const notesText = (chat) => ((chat.notes || []).length > 0 ? `Notes saved in this chat with save_note:\n${chat.notes.map((note) => `- ${note.key}: ${note.text}`).join('\n')}` : '');
 const buildMessages = (chat, listing = false, seeing = false) => {
     const out = [];
     const active = sortSkills(chat, listing).full;
-    const system = [...active.map((skill) => (skill.id === 'components' && !listing ? `${skill.text}\n\n${COMPONENT_VALUES_PAGE}` : skill.text)), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
+    const through = memoryStart(chat);
+    const system = [...active.map((skill) => (skill.id === 'components' && !listing ? `${skill.text}\n\n${COMPONENT_VALUES_PAGE}` : skill.text)), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, through > 0 && `Memory of the earlier part of this conversation (those messages are not repeated below):\n${chat.memory}`, notesText(chat), todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
     if (system) out.push({ role: 'system', content: system });
-    for (const message of chat.messages) {
+    for (const message of chat.messages.slice(through)) {
         if (!message.content) continue;
         let content = message.role === 'assistant' ? shortenPages(message.content) : message.content;
         let images = [];
@@ -2755,6 +2803,8 @@ const presentChat = (chat, facts = null) => ({
     tools: chat.tools || [],
     webSearch: chat.webSearch !== false,
     summary: chat.summary,
+    memoryThrough: memoryStart(chat),
+    notes: (chat.notes || []).map((note) => ({ key: note.key, text: note.text, updatedAt: note.updatedAt })),
     continuedFrom: chat.continuedFrom,
     options: chat.options || {},
     messages: chat.messages.map((message, index) => presentMessage(chat, message, index)),
@@ -2890,7 +2940,19 @@ export const deleteChat = asyncHandler(async (req, res) => {
     res.status(200).json({ success: true, message: 'Chat deleted.' });
 });
 
+// An edit or a fresh answer that reaches back into the messages a memory covers makes that memory wrong, so it goes.
+const keepMemoryValid = (chat) => {
+    if (chat.memoryThrough > 0 && chat.memoryThrough >= chat.messages.length) {
+        chat.memory = '';
+        chat.memoryThrough = 0;
+    }
+};
 const prepareTurn = (chat, body) => {
+    const problem = changeTurn(chat, body);
+    keepMemoryValid(chat);
+    return problem;
+};
+const changeTurn = (chat, body) => {
     if (body.regenerate) {
         while (chat.messages.length > 0 && chat.messages[chat.messages.length - 1].role === 'assistant') chat.messages.pop();
         return chat.messages.length > 0 ? null : 'There is no message to answer again.';
@@ -3023,7 +3085,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const draws = drawsComponents(chat);
         // A skill that is only on by default offers its files once the model has opened it.
         const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0 && (Array.isArray(chat.skills) || skill.default !== 'tools' || !listed.includes(skill))) : [];
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -3054,9 +3116,26 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         let totalMs = 0;
         let promptEvalCount = null;
         const results = new Map();
+        // Each tool result, with the step it came in, so results already read can be put away (see putAway).
+        const marks = [];
+        const awayKeys = new Set();
+        let round = 0;
+        const putAway = () => {
+            for (const mark of marks) {
+                if (mark.away || KEPT_RESULTS.has(mark.fn) || round - mark.round < 2) continue;
+                const held = messages[mark.index];
+                if (String(held.content || '').length < PUT_AWAY_MIN_CHARS) continue;
+                if (round - mark.round < PUT_AWAY_AFTER && promptTokens(messages) * 2 <= capacity) continue;
+                held.content = `[Put away to save room: what ${mark.fn} returned for ${clip(JSON.stringify(mark.given ?? {}), 300)}, ${String(held.content).length.toLocaleString('en-GB')} characters, read ${round - mark.round} steps ago. Call ${mark.fn} again with exactly the same input to see it again, or keep what you need with save_note.]`;
+                mark.away = true;
+                awayKeys.add(mark.key);
+            }
+        };
 
         try {
             while (!gone) {
+                putAway();
+                round += 1;
                 const request = {
                     model: chat.model,
                     messages,
@@ -3193,7 +3272,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     // model that has lost its way is moved on instead of going round in circles.
                     const same = `${mine ? mine.fn : name}\n${JSON.stringify(given ?? input)}`;
                     // Stop does not wait for a tool that is still running: a search, a page being read, a question to the person.
-                    const outcome = results.has(same) ? { content: `You already called ${mine ? mine.fn : name} with the same input in this reply. What it gave you then is above and has not changed: use it and go on with your answer.\n\n${clip(results.get(same), 2000)}` } : await Promise.race([
+                    const outcome = results.has(same) && awayKeys.has(same) ? { content: results.get(same) } : results.has(same) ? { content: `You already called ${mine ? mine.fn : name} with the same input in this reply. What it gave you then is above and has not changed: use it and go on with your answer.\n\n${clip(results.get(same), 2000)}` } : await Promise.race([
                         mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show, kept })
                             : offered.includes(name) ? runSearchTool(name, input)
                                 : { content: `There is no function called ${clip(name, 60)}. The functions you can call are: ${offered.join(', ')}.`, failed: 'failed' },
@@ -3205,6 +3284,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     }
                     if (!outcome.failed && !results.has(same)) results.set(same, String(outcome.content ?? ''));
                     messages.push({ role: 'tool', tool_name: name, content: outcome.content });
+                    awayKeys.delete(same);
+                    marks.push({ index: messages.length - 1, fn: mine ? mine.fn : name, given: given ?? input, key: same, round });
                     if (outcome.ends) ended = true;
                     if (gone || ended) break;
                 }
@@ -3268,6 +3349,47 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         title: chat.title,
         context: contextUse(chat, facts)
     });
+    if (reply.content && !reply.stopped && !reply.errorCode) foldMemory({ chat, facts, ollama, settings, userId });
+};
+
+const MEMORY_ASK = 'Rewrite the memory of this conversation so that it can go on without the messages it covers. Keep the user\'s goals, wishes and constraints, the facts that were established, the decisions and conclusions reached, what each reply delivered (figures, tables, files, pages, and what they showed), and the questions still open. Leave out greetings, filler and anything later replaced. Write short bullet points, newest last. Add nothing that was not said.';
+const MAX_MEMORY_CHARS = 12000;
+const foldMemory = async ({ chat, facts, ollama, settings, userId }) => {
+    try {
+        const capacity = capacityFor(chat, facts);
+        if (promptTokens(buildMessages(chat, facts.capabilities.includes('tools'))) * 100 < capacity * ROLL_PERCENT) return;
+        const from = memoryStart(chat);
+        let to = chat.messages.length - KEEP_MESSAGES;
+        while (to > from && chat.messages[to]?.role !== 'user') to -= 1;
+        if (to <= from) return;
+        const folded = chat.messages.slice(from, to).filter((message) => message.content);
+        const room = Math.max(1000, capacity - 2 * REPLY_RESERVE - estimateTokens(chat.memory) - 400);
+        const each = Math.max(400, Math.floor((room * 4) / Math.max(1, folded.length)));
+        const transcript = folded.map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${clip(shortenPages(message.content), each)}`).join('\n\n');
+        const ask = [{ role: 'user', content: [MEMORY_ASK, chat.memory && `The memory so far:\n${chat.memory}`, `The messages to add:\n${transcript}`].filter(Boolean).join('\n\n') }];
+        const job = queue.add({
+            userId,
+            lane: currentLane(),
+            priority: 'background',
+            run: () => ollama.chat({
+                model: chat.model,
+                messages: ask,
+                stream: false,
+                ...(facts.capabilities.includes('thinking') ? { think: false } : {}),
+                options: { ...(chat.options || {}), num_ctx: capacity },
+                keep_alive: `${settings.keepAliveMinutes}m`
+            })
+        });
+        const memory = String((await job.done)?.message?.content || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+        if (!memory) return;
+        // Saved only if nothing moved meanwhile: the memory still starts where it did and the messages are still there.
+        await Chat.updateOne(
+            { _id: chat._id, memoryThrough: chat.memoryThrough || 0, $expr: { $gte: [{ $size: '$messages' }, to] } },
+            { $set: { memory: clip(memory, MAX_MEMORY_CHARS), memoryThrough: to } }
+        );
+    } catch (error) {
+        logger.warn('[Chat] The memory could not be updated', { chatId: chat.id, code: mapOllamaError(error).code });
+    }
 };
 
 const openLive = (id) => {
