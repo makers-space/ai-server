@@ -12,7 +12,7 @@ import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
-    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, runInSandbox, sandboxReady, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
+    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
@@ -195,6 +195,7 @@ const RESUME_WINDOW_MS = 30 * 60 * 1000;
 
 const sendOllamaError = (res, error) => {
     if (!(error instanceof OllamaError)) throw error;
+    if (error.code === 'FILES_DOWN') logger.warn('[Files] FilesystemOne could not be reached', { detail: String(error.detail || '').slice(0, 200), host: (() => { try { return new URL(process.env.FILESYSTEM_ONE_URL).host; } catch { return 'not set'; } })() });
     const body = { success: false, ...error.toJSON() };
     if (error.neededMb) {
         body.neededMb = error.neededMb;
@@ -1551,6 +1552,8 @@ const runSearchTool = async (name, input) => {
 
 const MAX_CHAT_MESSAGES = 200;
 const MAX_CHAT_ATTACHMENT_CHARS = 2000000;
+// What an image costs a model that can see, roughly: most count an image as several hundred to about a thousand tokens.
+const IMAGE_TOKENS = 1000;
 const AUTO_CONTEXT_LIMIT = 32768;
 const CONTEXT_STEPS = [8192, 16384, AUTO_CONTEXT_LIMIT];
 const REPLY_RESERVE = 1024;
@@ -2674,7 +2677,7 @@ const shortenPages = (text) => String(text).replace(/```component\n(<Frame\b[^>]
     const title = (opening.match(/\btitle="([^"]*)"/) || [])[1] || 'a page';
     return `[Shown here: "${title}", a page of ${block.length.toLocaleString('en-GB')} characters, not repeated.]`;
 });
-const buildMessages = (chat, listing = false) => {
+const buildMessages = (chat, listing = false, seeing = false) => {
     const out = [];
     const active = sortSkills(chat, listing).full;
     const system = [...active.map((skill) => (skill.id === 'components' && !listing ? `${skill.text}\n\n${COMPONENT_VALUES_PAGE}` : skill.text)), systemText(chat), chat.summary && `Summary of the earlier conversation:\n${chat.summary}`, todayLine(), closingOf(chat)].filter(Boolean).join('\n\n');
@@ -2682,14 +2685,14 @@ const buildMessages = (chat, listing = false) => {
     for (const message of chat.messages) {
         if (!message.content) continue;
         let content = message.role === 'assistant' ? shortenPages(message.content) : message.content;
+        let images = [];
         if (message.role === 'user' && message.attachmentIds.length > 0) {
-            const documents = message.attachmentIds
-                .map((id) => chat.attachments.id(id))
-                .filter(Boolean)
-                .map((attachment) => `Document "${attachment.name}":\n${attachment.text}`);
+            const attached = message.attachmentIds.map((id) => chat.attachments.id(id)).filter(Boolean);
+            const documents = attached.filter((attachment) => !attachment.image).map((attachment) => `Document "${attachment.name}":\n${attachment.text}`);
             if (documents.length > 0) content = `${documents.join('\n\n')}\n\n${content}`;
+            if (seeing) images = attached.filter((attachment) => attachment.image).map((attachment) => attachment.image);
         }
-        out.push({ role: message.role, content });
+        out.push({ role: message.role, content, ...(images.length > 0 ? { images } : {}) });
     }
     return out;
 };
@@ -2713,7 +2716,8 @@ const presentAttachment = (attachment) => ({
     source: attachment.source,
     path: attachment.path,
     chars: attachment.chars,
-    tokens: attachment.tokens
+    tokens: attachment.tokens,
+    image: Boolean(attachment.image)
 });
 
 const presentMessage = (chat, message, index) => ({
@@ -2926,7 +2930,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         if (!chat.model) chat.model = await chooseModel(ollama, userId);
         facts = await modelFacts(ollama, chat.model);
 
-        prompt = buildMessages(chat, facts.capabilities.includes('tools'));
+        prompt = buildMessages(chat, facts.capabilities.includes('tools'), facts.capabilities.includes('vision'));
         const needed = promptTokens(prompt) + REPLY_RESERVE;
         if (needed > capacityFor(chat, facts)) {
             const lastUser = chat.messages[chat.messages.length - 1];
@@ -3481,12 +3485,21 @@ export const addAttachment = asyncHandler(async (req, res) => {
         if (Buffer.isBuffer(req.body)) {
             const { error, value } = chatSchemas.attachUpload.validate(req.query);
             if (error) return invalid(res, error);
-            document = { name: value.name, source: SERVICE, path: null, text: await extractText({ buffer: req.body, name: value.name }) };
+            document = imageTypeOf(value.name) ? { name: value.name, source: SERVICE, path: null, buffer: req.body } : { name: value.name, source: SERVICE, path: null, text: await extractText({ buffer: req.body, name: value.name }) };
         } else {
             const { error, value } = chatSchemas.attachFile.validate(req.body);
             if (error) return invalid(res, error);
-            const file = await filesFor(req).text(value.path);
-            document = { name: file.name, source: 'fs-one', path: value.path, text: file.text };
+            const file = imageTypeOf(value.path) ? await filesFor(req).bytes(value.path) : await filesFor(req).text(value.path);
+            document = file.buffer ? { name: file.name, source: 'fs-one', path: value.path, buffer: file.buffer } : { name: file.name, source: 'fs-one', path: value.path, text: file.text };
+        }
+        if (document.buffer) {
+            const facts = await factsOrNull(chat);
+            if (facts && !facts.capabilities.includes('vision')) throw new OllamaError('NO_VISION');
+            const kept = chat.attachments.reduce((sum, attachment) => sum + (attachment.image ? Math.floor(attachment.image.length * 0.75) : 0), 0);
+            if (document.buffer.length > MAX_IMAGE_BYTES || kept + document.buffer.length > MAX_CHAT_IMAGE_BYTES) throw new OllamaError('IMAGE_TOO_LARGE');
+            chat.attachments.push({ name: document.name, source: document.source, path: document.path, text: '', image: document.buffer.toString('base64'), mime: imageTypeOf(document.name), chars: 0, tokens: IMAGE_TOKENS });
+            await chat.save();
+            return res.status(201).json({ success: true, chat: presentChat(chat, facts) });
         }
 
         const tokens = estimateTokens(document.text);

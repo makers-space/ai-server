@@ -108,6 +108,16 @@ const ERROR_TABLE = {
         message: 'The file could not be saved in this folder.',
         action: 'Pick a folder you are allowed to add files to.'
     },
+    NO_VISION: {
+        status: 400,
+        message: 'This model cannot see images.',
+        action: 'Pick a model marked Vision to attach an image.'
+    },
+    IMAGE_TOO_LARGE: {
+        status: 413,
+        message: 'This image is larger than 4 MB, or the chat already holds 10 MB of images.',
+        action: 'Use a smaller image, or start a new chat.'
+    },
     FILES_DOWN: {
         status: 503,
         message: 'Your files are not available right now.',
@@ -867,6 +877,19 @@ export class GenerationQueue extends EventEmitter {
 }
 
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+// An image is kept with its chat as it is and sent to a model that can see. A chat is one record, so its images are kept small.
+export const IMAGE_TYPES = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif' };
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+export const MAX_CHAT_IMAGE_BYTES = 10 * 1024 * 1024;
+export const imageTypeOf = (name) => IMAGE_TYPES[path.extname(String(name || '')).toLowerCase()] || null;
+// What an image is, read from its first bytes, for the services that need to be told.
+const imageMime = (base64) => {
+    const head = Buffer.from(String(base64).slice(0, 24), 'base64');
+    if (head[0] === 0xff && head[1] === 0xd8) return 'image/jpeg';
+    if (head.subarray(0, 4).toString('latin1') === 'GIF8') return 'image/gif';
+    if (head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+    return 'image/png';
+};
 export const estimateTokens = (text) => Math.ceil(String(text || '').length / 4);
 
 const PLAIN_TEXT = new Set([
@@ -1024,7 +1047,7 @@ export const createFilesClient = ({ baseUrl, accessToken }) => {
         try {
             response = await filesFetch(url, { ...options, headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(20000) });
         } catch (error) {
-            throw new OllamaError('FILES_DOWN', error.message);
+            throw new OllamaError('FILES_DOWN', `${error.message}${error.cause ? `: ${error.cause.code || error.cause.message}` : ''}`);
         }
         if (response.status >= 500 || response.status === 429) throw new OllamaError('FILES_DOWN', `status ${response.status}`);
         if (!response.ok) throw new OllamaError(failure, `status ${response.status}`);
@@ -1832,7 +1855,7 @@ const toSharedShape = (messages) => {
             return { role: 'assistant', content: message.content || '', tool_calls: calls };
         }
         if (message.role === 'user' && Array.isArray(message.images) && message.images.length > 0) {
-            return { role: 'user', content: [{ type: 'text', text: String(message.content ?? '') }, ...message.images.map((image) => ({ type: 'image_url', image_url: { url: `data:image/png;base64,${image}` } }))] };
+            return { role: 'user', content: [{ type: 'text', text: String(message.content ?? '') }, ...message.images.map((image) => ({ type: 'image_url', image_url: { url: `data:${imageMime(image)};base64,${image}` } }))] };
         }
         return { role: message.role, content: String(message.content ?? '') };
     });
@@ -1919,7 +1942,7 @@ const toClaudeShape = (messages) => {
                 return { type: 'tool_use', id, name: call.function?.name, input: call.function?.arguments || {} };
             })];
         } else if (role === 'user' && Array.isArray(message.images) && message.images.length > 0) {
-            content = [...message.images.map((image) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image } })), { type: 'text', text: String(message.content ?? '') }];
+            content = [...message.images.map((image) => ({ type: 'image', source: { type: 'base64', media_type: imageMime(image), data: image } })), { type: 'text', text: String(message.content ?? '') }];
         } else {
             content = String(message.content ?? '') || '…';
         }

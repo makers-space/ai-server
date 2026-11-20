@@ -205,7 +205,9 @@ const chatAttachmentSchema = new mongoose.Schema({
     name: { type: String, required: true, maxlength: 255 },
     source: { type: String, enum: [SERVICE, 'fs-one'], default: SERVICE },
     path: { type: String, default: null },
-    text: { type: String, required: true },
+    text: { type: String, default: '', required: function needsText() { return !this.image; } },
+    image: { type: String, default: null },
+    mime: { type: String, default: null },
     chars: { type: Number, required: true },
     tokens: { type: Number, required: true },
     sent: { type: Boolean, default: false }
