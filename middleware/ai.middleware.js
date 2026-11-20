@@ -120,8 +120,8 @@ const ERROR_TABLE = {
     },
     FILES_DOWN: {
         status: 503,
-        message: 'Your files are not available right now.',
-        action: 'Check that FilesystemOne is running. Everything else keeps working.'
+        message: 'Your files could not be reached. FilesystemOne may still be starting up, which can take a minute.',
+        action: 'Try again in a minute. Everything else keeps working.'
     },
     REMOTE_BLOCKED: {
         status: 400,
@@ -1037,17 +1037,33 @@ export const runSkillScript = async (job, wait = 360000) => {
     return body;
 };
 
+let filesRetryMs = 3000;
+let filesWakeMs = 90000;
+export const setFilesWakeMs = (ms, retryMs) => {
+    filesWakeMs = ms ?? 90000;
+    filesRetryMs = retryMs ?? 3000;
+};
 export const createFilesClient = ({ baseUrl, accessToken }) => {
     const root = `${String(baseUrl || '').replace(/\/+$/, '')}/api/v1/files`;
     const csrf = 'ai-base-server';
     const headers = { Cookie: `accessToken=${accessToken}; csrfToken=${csrf}`, 'X-CSRF-Token': csrf, Accept: 'application/json' };
 
+    // A FilesystemOne that has gone to sleep answers 502 to 504, or not at all, while it starts, which can take over a
+    // minute; it is asked again for up to 90 seconds.
     const call = async (url, options = {}, failure = 'FILE_NOT_FOUND') => {
+        const until = Date.now() + filesWakeMs;
         let response;
-        try {
-            response = await filesFetch(url, { ...options, headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(20000) });
-        } catch (error) {
-            throw new OllamaError('FILES_DOWN', `${error.message}${error.cause ? `: ${error.cause.code || error.cause.message}` : ''}`);
+        for (;;) {
+            let problem = null;
+            try {
+                response = await filesFetch(url, { ...options, headers: { ...headers, ...options.headers }, signal: AbortSignal.timeout(20000) });
+                if ([502, 503, 504].includes(response.status)) problem = `status ${response.status}`;
+            } catch (error) {
+                problem = `${error.message}${error.cause ? `: ${error.cause.code || error.cause.message}` : ''}`;
+            }
+            if (!problem) break;
+            if (Date.now() + filesRetryMs >= until || options.body instanceof FormData) throw new OllamaError('FILES_DOWN', problem);
+            await new Promise((resolve) => setTimeout(resolve, filesRetryMs));
         }
         if (response.status >= 500 || response.status === 429) throw new OllamaError('FILES_DOWN', `status ${response.status}`);
         if (!response.ok) throw new OllamaError(failure, `status ${response.status}`);
@@ -1841,24 +1857,42 @@ const askCloud = async (entry, key, path, init = {}) => {
 };
 
 // Turns the conversation the chat loop keeps, which is in Ollama's shape, into the shape most online services share.
+// A tool result in this shape holds only text, so the pictures a tool returned follow the results as one user message.
 const toSharedShape = (messages) => {
+    const shaped = [];
+    let pictures = [];
+    const flush = () => {
+        if (pictures.length === 0) return;
+        shaped.push({ role: 'user', content: [{ type: 'text', text: 'The pictures the tool returned:' }, ...pictures.map((image) => ({ type: 'image_url', image_url: { url: `data:${imageMime(image)};base64,${image}` } }))] });
+        pictures = [];
+    };
+    for (const one of toSharedTurns(messages)) {
+        if (one.role !== 'tool') flush();
+        shaped.push(one.message);
+        if (one.role === 'tool') pictures.push(...one.images);
+    }
+    flush();
+    return shaped;
+};
+const toSharedTurns = (messages) => {
     const waiting = [];
     let count = 0;
-    return messages.map((message) => {
-        if (message.role === 'tool') return { role: 'tool', tool_call_id: waiting.shift() || `call_${++count}`, content: String(message.content ?? '') };
-        if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
-            const calls = message.tool_calls.map((call) => {
-                const id = `call_${++count}`;
-                waiting.push(id);
-                return { id, type: 'function', function: { name: call.function?.name, arguments: JSON.stringify(call.function?.arguments || {}) } };
-            });
-            return { role: 'assistant', content: message.content || '', tool_calls: calls };
-        }
-        if (message.role === 'user' && Array.isArray(message.images) && message.images.length > 0) {
-            return { role: 'user', content: [{ type: 'text', text: String(message.content ?? '') }, ...message.images.map((image) => ({ type: 'image_url', image_url: { url: `data:${imageMime(image)};base64,${image}` } }))] };
-        }
-        return { role: message.role, content: String(message.content ?? '') };
-    });
+    return messages.map((message) => ({ role: message.role, images: Array.isArray(message.images) ? message.images : [], message: sharedMessage(message, waiting, () => ++count) }));
+};
+const sharedMessage = (message, waiting, next) => {
+    if (message.role === 'tool') return { role: 'tool', tool_call_id: waiting.shift() || `call_${next()}`, content: String(message.content ?? '') };
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+        const calls = message.tool_calls.map((call) => {
+            const id = `call_${next()}`;
+            waiting.push(id);
+            return { id, type: 'function', function: { name: call.function?.name, arguments: JSON.stringify(call.function?.arguments || {}) } };
+        });
+        return { role: 'assistant', content: message.content || '', tool_calls: calls };
+    }
+    if (message.role === 'user' && Array.isArray(message.images) && message.images.length > 0) {
+        return { role: 'user', content: [{ type: 'text', text: String(message.content ?? '') }, ...message.images.map((image) => ({ type: 'image_url', image_url: { url: `data:${imageMime(image)};base64,${image}` } }))] };
+    }
+    return { role: message.role, content: String(message.content ?? '') };
 };
 const textOf = (content) => (typeof content === 'string' ? content : Array.isArray(content) ? content.filter((piece) => piece?.type === 'text').map((piece) => piece.text || '').join('') : '');
 const thoughtOf = (delta) => delta.reasoning_content || delta.reasoning
@@ -1896,6 +1930,7 @@ async function* sharedParts(response, started) {
             for (const call of delta.tool_calls || []) {
                 const kept = calls.get(call.index ?? 0) || { name: '', text: '' };
                 if (!kept.name && call.function?.name) yield { message: { tool_start: call.function.name } };
+                if (call.function?.arguments) yield { message: { tool_draft: call.function.arguments } };
                 calls.set(call.index ?? 0, { name: kept.name || call.function?.name || '', text: kept.text + (call.function?.arguments || '') });
             }
         }
@@ -1934,7 +1969,8 @@ const toClaudeShape = (messages) => {
         let role = message.role === 'assistant' ? 'assistant' : 'user';
         let content;
         if (message.role === 'tool') {
-            content = [{ type: 'tool_result', tool_use_id: waiting.shift() || `toolu_${++count}`, content: String(message.content ?? '') }];
+            const pictures = (Array.isArray(message.images) ? message.images : []).map((image) => ({ type: 'image', source: { type: 'base64', media_type: imageMime(image), data: image } }));
+            content = [{ type: 'tool_result', tool_use_id: waiting.shift() || `toolu_${++count}`, content: pictures.length > 0 ? [{ type: 'text', text: String(message.content ?? '') }, ...pictures] : String(message.content ?? '') }];
         } else if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
             content = [...(message.content ? [{ type: 'text', text: String(message.content) }] : []), ...message.tool_calls.map((call) => {
                 const id = `toolu_${++count}`;
@@ -1962,7 +1998,9 @@ const claudeRequest = (request, known) => {
         max_tokens: Math.min(cap, request.stream ? 64000 : 16000),
         messages: turns,
         ...(system ? { system } : {}),
-        ...(request.tools ? { tools: request.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters })) } : {})
+        // Streamed, each call is passed on as it is written instead of only once it is whole, so the person sees a long
+        // call, such as a whole figure, take shape.
+        ...(request.tools ? { tools: request.tools.map((tool) => ({ name: tool.function.name, description: tool.function.description, input_schema: tool.function.parameters, ...(request.stream ? { eager_input_streaming: true } : {}) })) } : {})
     };
 };
 async function* claudeParts(stream, started) {
@@ -1972,17 +2010,21 @@ async function* claudeParts(stream, started) {
             // while a long call, such as a whole figure, is still being written.
             if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') yield { message: { tool_start: event.content_block.name } };
             if (event.type !== 'content_block_delta') continue;
+            if (event.delta.type === 'input_json_delta' && event.delta.partial_json) yield { message: { tool_draft: event.delta.partial_json } };
             if (event.delta.type === 'thinking_delta' && event.delta.thinking) yield { message: { thinking: event.delta.thinking } };
             if (event.delta.type === 'text_delta' && event.delta.text) yield { message: { content: event.delta.text } };
         }
         const final = await stream.finalMessage();
         if (final.stop_reason === 'refusal') yield { message: { content: 'This model declined to answer that request.' } };
-        const calls = final.content.filter((block) => block.type === 'tool_use');
+        // A call cut off by the length limit or by a refusal is never run: it may be only part of what was meant.
+        const calls = ['max_tokens', 'refusal'].includes(final.stop_reason) ? [] : final.content.filter((block) => block.type === 'tool_use');
         if (calls.length > 0) yield { message: { tool_calls: calls.map((block) => ({ function: { name: block.name, arguments: block.input || {} } })) } };
         const usage = final.usage || {};
         yield { done: true, done_reason: final.stop_reason === 'max_tokens' ? 'length' : 'stop', eval_count: usage.output_tokens || 0, prompt_eval_count: (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0), total_duration: (Date.now() - started) * 1e6 };
     } catch (error) {
         if (error?.name === 'AbortError' || error instanceof Anthropic.APIUserAbortError) throw error;
+        // A call streamed as it was written may not be readable JSON; the chat asks the model once more.
+        if (error instanceof SyntaxError) throw Object.assign(new Error(`The tool call could not be read: ${error.message}`), { error: 'tool call could not be read' });
         throw claudeFault(error);
     }
 }

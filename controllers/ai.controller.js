@@ -2298,19 +2298,23 @@ const runnerFunction = (kind) => ({
 // A program the model writes, run in a sandbox: what most skills' commands come to, and what a skill that has the model
 // write its own build or check needs. One that reads or writes the person's files asks first.
 const MAX_PROGRAM_CHARS = 100000;
+const LOOK_TYPES = /\.(png|jpe?g|webp|gif)$/i;
+const MAX_LOOKS = 6;
+const MAX_LOOK_BYTES = 3 * 1024 * 1024;
 const programFunction = () => ({
     name: 'run_program',
     label: 'Program',
     doing: 'Running the program…',
     changes: touchesFiles,
-    description: `Runs a program you write in a computer of its own that has no network and is thrown away afterwards, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. The user is asked first only when it is given files or save_to; a program with neither, such as one that looks around or checks something, runs straight away. Nothing is kept from one call to the next, so do the whole job in one program, which may run for up to five minutes.`,
+    description: `Runs a program you write in a computer of its own that has no network and is thrown away afterwards, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. The user is asked first only when it is given files or save_to; a program with neither, such as one that looks around or checks something, runs straight away. To see what you built, have the program take screenshots (chromium --headless --screenshot, or Playwright) and name them in look: they come back to you as pictures. Nothing is kept from one call to the next, so do the whole job in one program, which may run for up to five minutes.`,
     parameters: {
         type: 'object',
         properties: {
             language: { type: 'string', enum: ['python', 'node', 'bash'], description: 'What the program is written in' },
             code: { type: 'string', description: 'The whole program' },
             files: filesParameter,
-            save_to: saveParameter
+            save_to: saveParameter,
+            look: { type: 'array', items: { type: 'string' }, description: 'Pictures the program makes that you want to see, as paths in its folder, such as shots/front.png. They come back to you as images and are not saved to the user\'s files.' }
         },
         required: ['language', 'code']
     },
@@ -2335,7 +2339,14 @@ const programFunction = () => ({
         } catch (error) {
             return { content: `Nothing was run. ${error.message}`, failed: 'failed' };
         }
-        return reportRun(`The ${language} program`, answer, await savePersonFiles(files, folder, answer.files || []));
+        // Pictures named in look come back to the model to see; the rest is saved as usual.
+        const look = (Array.isArray(input?.look) ? input.look.map((one) => String(one).trim().replace(/^\.?\//, '')) : []).filter(Boolean);
+        const shots = (answer.files || []).filter((file) => look.includes(file.path) && LOOK_TYPES.test(file.path) && file.buffer.length <= MAX_LOOK_BYTES).slice(0, MAX_LOOKS);
+        const report = reportRun(`The ${language} program`, answer, await savePersonFiles(files, folder, (answer.files || []).filter((file) => !look.includes(file.path))));
+        if (look.length === 0) return report;
+        const missing = look.filter((one) => !shots.some((file) => file.path === one));
+        const seen = [shots.length > 0 && `The pictures you asked to see are attached: ${shots.map((file) => file.path).join(', ')}.`, missing.length > 0 && `Not attached (not made, not a PNG, JPEG, WebP or GIF picture, over ${MAX_LOOK_BYTES / 1024 / 1024} MB, or past ${MAX_LOOKS} pictures): ${missing.join(', ')}.`].filter(Boolean).join(' ');
+        return { ...report, content: `${report.content}\n\n${seen}`, ...(shots.length > 0 ? { images: shots.map((file) => file.buffer.toString('base64')) } : {}) };
     }
 });
 const asChatTool = (entry, shown) => ({
@@ -3127,6 +3138,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                 const held = messages[mark.index];
                 if (String(held.content || '').length < PUT_AWAY_MIN_CHARS) continue;
                 if (round - mark.round < PUT_AWAY_AFTER && promptTokens(messages) * 2 <= capacity) continue;
+                delete held.images;
                 held.content = `[Put away to save room: what ${mark.fn} returned for ${clip(JSON.stringify(mark.given ?? {}), 300)}, ${String(held.content).length.toLocaleString('en-GB')} characters, read ${round - mark.round} steps ago. Call ${mark.fn} again with exactly the same input to see it again, or keep what you need with save_note.]`;
                 mark.away = true;
                 awayKeys.add(mark.key);
@@ -3159,6 +3171,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     // Nothing that arrives after Stop is kept or shown, even if the service had already sent it.
                     if (gone) break;
                     if (part.message?.tool_start) write({ type: 'note', text: doingOf(String(part.message.tool_start), chatTools) });
+                    if (part.message?.tool_draft) write({ type: 'draft', text: String(part.message.tool_draft) });
                     if (part.message?.thinking) {
                         reply.thinking += part.message.thinking;
                         write({ type: 'thinking', text: part.message.thinking });
@@ -3284,7 +3297,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         write({ type: 'toolFailed', failed: outcome.failed });
                     }
                     if (!outcome.failed && !results.has(same)) results.set(same, String(outcome.content ?? ''));
-                    messages.push({ role: 'tool', tool_name: name, content: outcome.content });
+                    const pictures = Array.isArray(outcome.images) && outcome.images.length > 0 ? outcome.images : null;
+                    const seesPictures = facts.capabilities.includes('vision');
+                    messages.push({ role: 'tool', tool_name: name, content: pictures && !seesPictures ? `${outcome.content}\n\nThis model cannot see pictures, so they were not sent.` : outcome.content, ...(pictures && seesPictures ? { images: pictures } : {}) });
                     awayKeys.delete(same);
                     marks.push({ index: messages.length - 1, fn: mine ? mine.fn : name, given: given ?? input, key: same, round });
                     if (outcome.ends) ended = true;
