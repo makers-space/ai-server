@@ -941,12 +941,14 @@ const sandboxesOf = async () => {
 const PROGRAM_RUNS = { python: ['python', 'py'], node: ['node', 'js'], bash: ['bash', 'sh'] };
 const SANDBOX_FILES = 40;
 const SANDBOX_BYTES = 25 * 1024 * 1024;
-export const runInSandbox = async ({ language, code, files = [], seconds = 300 }) => {
+// The network is shut unless a job names the few addresses it may reach.
+export const runInSandbox = async ({ language, code, files = [], seconds = 300, allow = [] }) => {
     const [command, ending] = PROGRAM_RUNS[language] || PROGRAM_RUNS.python;
     const sandboxes = await sandboxesOf();
+    const networkPolicy = allow.length > 0 ? { type: 'allow-list', rules: allow.map((domain) => ({ domain })) } : { type: 'deny-all' };
     let sandbox;
     try {
-        sandbox = await sandboxes.create({ snapshotName: process.env.SANDBOX_SNAPSHOT, networkPolicy: { type: 'deny-all' }, timeoutSeconds: 900, idleTimeoutSeconds: 300, wait: { timeoutMs: 120000 } });
+        sandbox = await sandboxes.create({ snapshotName: process.env.SANDBOX_SNAPSHOT, networkPolicy, timeoutSeconds: 900, idleTimeoutSeconds: 300, wait: { timeoutMs: 120000 } });
     } catch (error) {
         throw new Error(`A sandbox could not be started: ${String(error?.message || error).slice(0, 200)}`);
     }

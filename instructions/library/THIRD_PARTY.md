@@ -278,3 +278,19 @@ https://github.com/Leonxlnx/taste-skill
 1 skills, in `taste`. Licence: MIT. Copyright (c) 2026 Leonxlnx.
 
 Taken from `skills/taste-skill/SKILL.md` at commit f6b7657 (tasteskill 2.5.1). The files its instructions name (`assets`, `library`, `references`, `scripts`; about 1,600 files) and its Stop hook are not included, so it is marked as needing files and commands.
+
+## xronocode/rich-md-skill
+
+https://github.com/xronocode/rich-md-skill
+
+1 skills, in `richmd`. Licence: MIT. Copyright (c) xronocode.
+
+Rich Markdown First comes with the three reference pages of `skills/rich-md-first`, copied unchanged at commit b74aa4e1841e, in `richmd/richmd-rich-md-first`.
+
+## nicobailon/visual-explainer
+
+https://github.com/nicobailon/visual-explainer
+
+1 skills, in `explainer`. Licence: MIT. Copyright (c) 2025 Nico Bailon.
+
+Visual Explainer comes with part of `plugins/visual-explainer`, copied unchanged at commit 9d5f880b7e8e, in `explainer/explainer-visual-explainer`: its reference pages, page templates, and the kit's styles, scripts and drawing defs that a built page holds. Its render and checks run in a sandbox, where the whole folder is.

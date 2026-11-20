@@ -1625,7 +1625,9 @@ export const SKILL_SOURCES = {
     last30days: { name: 'Last 30 days', repo: 'mvanhorn/last30days-skill' },
     anatomy: { name: 'Anatomy', repo: 'wheresryan22/anatomy' },
     hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' },
-    taste: { name: 'Taste (Leonxlnx)', repo: 'Leonxlnx/taste-skill' }
+    taste: { name: 'Taste (Leonxlnx)', repo: 'Leonxlnx/taste-skill' },
+    richmd: { name: 'Rich Markdown First', repo: 'xronocode/rich-md-skill' },
+    explainer: { name: 'Visual Explainer', repo: 'nicobailon/visual-explainer' }
 };
 const LIBRARY = path.join(INSTRUCTIONS, 'library');
 // A skill may come with files of its own: the reference pages, examples and code its instructions name. They sit in a
@@ -1693,7 +1695,7 @@ const skillSetup = (skill) => {
 // Library skills that are on in a chat until the person chooses its skills. 'tools' means only for a model that can
 // use tools: such a model is shown just the skill's name and description and opens it when a request fits, where a
 // model that cannot use tools would be sent the whole skill with every message.
-export const DEFAULT_LIBRARY_SKILLS = {};
+export const DEFAULT_LIBRARY_SKILLS = { 'richmd-rich-md-first': 'tools', 'explainer-visual-explainer': 'tools' };
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
     const head = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -2075,6 +2077,39 @@ const SKILL_FUNCTIONS = {
                 ? [`Built hairline-${name}.html and showed it to the user in the chat, with ${faults.length} still to fix:`, ...faults, 'Tell the user what is still wrong. You cannot see the page from here.'].join('\n')
                 : `Built hairline-${name}.html and showed it to the user in the chat. validate: ok, the figure passes the static checks. You cannot see the page from here, so the look has not been done.` };
         }
+    }],
+    'explainer-visual-explainer': [{
+        name: 'visual_explainer_render',
+        label: 'Visual Explainer render',
+        doing: 'Rendering the page…',
+        ready: () => sandboxReady(),
+        description: 'Does what `node kit/render.mjs <name>.src.html` does in the Visual Explainer skill, then shows the page to the user in the chat: it renders your page source with the skill\'s kit, looks at it in a browser, and gives you the report. Give the whole source page as you would write <name>.src.html, linking the kit with <link rel="stylesheet" data-ve-kit>. The page is shown in the app\'s own theme, which takes the place of the kit\'s colours and fonts, so pick no register or palette and add no theme picker. Fix every ✗ the report lists and call again with the whole page. Nothing is saved to the user\'s files.',
+        parameters: { type: 'object', properties: { page: { type: 'string', description: 'The whole page source, as <name>.src.html' }, title: { type: 'string', description: 'A few words naming the page' } }, required: ['page'] },
+        run: async (input, { show, kept }) => {
+            const page = String(input?.page ?? '').replace(/\r\n/g, '\n').trim();
+            const title = clip(String(input?.title || 'Visual explainer').replace(/["<>]/g, ''), 80);
+            if (!/data-ve-kit/.test(page)) return { content: 'Nothing was rendered. The page must link the kit in its <head>: <link rel="stylesheet" href="kit.css" data-ve-kit>.', failed: 'failed' };
+            if (page.length > MAX_PROGRAM_CHARS) return { content: `Nothing was rendered. A page may be at most ${MAX_PROGRAM_CHARS.toLocaleString('en-GB')} characters.`, failed: 'failed' };
+            let answer;
+            try {
+                // The rendered page asks Google for its fonts, and the check in the browser waits for the page to load, so
+                // this one job may reach those two addresses and nothing else.
+                answer = await runInSandbox({ language: 'bash', seconds: 120, allow: ['fonts.googleapis.com', 'fonts.gstatic.com'], files: [{ path: 'page.src.html', buffer: Buffer.from(page) }], code: 'node /root/skills/visual-explainer/kit/render.mjs page.src.html -o page.html 2>&1' });
+            } catch (error) {
+                return { content: `Nothing was rendered. ${error.message}`, failed: 'failed' };
+            }
+            const report = String(answer.stdout || '').replace(/\/root\/work\//g, '').trim();
+            const built = (answer.files || []).find((one) => one.path === 'page.html');
+            if (!built) return { content: `Nothing was shown: the render wrote no page.\n${clip(report || answer.stderr, 4000)}\nFix this and call visual_explainer_render again with the whole page.`, failed: 'failed' };
+            const problems = answer.exitCode !== 0;
+            // A page with something to fix goes back once before it is shown, as the skill has it fixed first; a second
+            // render is shown whatever is left, so the person is never left with nothing.
+            const before = kept?.get('visual_explainer_render') || 0;
+            kept?.set('visual_explainer_render', before + 1);
+            if (problems && before === 0) return { content: `Not shown yet. The render found something to fix:\n${clip(report, 4000)}\nFix these and call visual_explainer_render again with the whole page.`, failed: 'failed' };
+            show(explainerBlock(built.buffer.toString('utf8'), title));
+            return { content: `Rendered and showed "${title}" to the user in the chat, in the app's theme.${problems ? ' Still to fix:' : ' Report:'}\n${clip(report, 3000)}\nYou cannot see the page from here.` };
+        }
     }]
 };
 // What the Hairline kit's own validate.mjs says of a figure. With the skill runner set up, the kit's two commands are
@@ -2100,13 +2135,46 @@ const hairlineChecks = async (code) => {
     }
 };
 
+// A built Visual Explainer page holds the kit's styles and scripts word for word. In the reply they are named, as Parts
+// the chat fills from the skill's own files, so the chat keeps only the page's own text. A page whose kit does not
+// match the files here is kept whole. The kit's colours and fonts give way to the app's theme.
+const EXPLAINER = 'explainer-visual-explainer';
+const EXPLAINER_PALETTE = 'bg:background, surface:surface, node-top:surface, border:border, border-bright:text 45%, text:text, text-dim:text 65%, accent:primary, accent-dim:primary 14%, ok:success, warn:warning, risk:error, info:secondary';
+const explainerKit = (page) => {
+    const skill = SKILLS.find((one) => one.id === EXPLAINER);
+    const read = (name) => skillFileText(skill, `kit/${name}`);
+    const parts = [];
+    let text = page;
+    const swapBlock = (tag, choices, join, prefix) => {
+        const found = text.match(new RegExp(`(<${tag} data-ve-kit[^>]*>)([\\s\\S]*?)(</${tag}>)`));
+        if (!found) return;
+        for (const names of choices) {
+            const files = names.map(read);
+            if (files.some((one) => one === null)) continue;
+            const whole = join(files);
+            if (found[2].replace(/\r\n/g, '\n').trim() !== whole.trim()) continue;
+            const markers = names.map((name, at) => `/*${prefix}_${at + 1}*/`).join('');
+            names.forEach((name, at) => parts.push(`<Part name="${prefix}_${at + 1}" file="${EXPLAINER}/kit/${name}" />`));
+            text = text.replace(found[0], () => `${found[1]}${markers}${found[3]}`);
+            return;
+        }
+    };
+    swapBlock('style', [['kit.css'], ['kit.css', 'ask.css'], ['kit.css', 'mermaid.css'], ['kit.css', 'ask.css', 'mermaid.css']], (files) => files.join(''), 'VE_CSS');
+    swapBlock('script', [['reply.js', 'kit.js'], ['reply.js', 'ask.js', 'kit.js']], (files) => files.join('\n').replace(/<\/script/gi, '<\\/script'), 'VE_JS');
+    return { text, parts };
+};
+const explainerBlock = (page, title) => {
+    const { text, parts } = explainerKit(page);
+    return ['```component', `<Frame height="720px" title="${title}" palette="${EXPLAINER_PALETTE}">`, text, ...parts, '</Frame>', '```'].join('\n');
+};
+
 // The office skills' own scripts run on the skill runner, on files from the person's FilesystemOne, and what a script
 // makes is saved back there. Only a script that ships with the skill is run, never code a model writes, so these
 // skills still say "Guidance only": the parts that have the model write its own program are not done here.
 const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'marketing-conversion-tracking': 'conversion-tracking' };
 // The skills whose own files are in the sandbox snapshot, by their folder there (/root/skills/<folder>). With sandboxes
 // set up, these lack nothing: their commands run, as programs a model writes, beside their files.
-const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy' };
+const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy', 'explainer-visual-explainer': 'visual-explainer' };
 // Whose files a reply may reach: the sign-in of the person who sent the message.
 const filesScope = new AsyncLocalStorage();
 const personFiles = () => createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore() });
@@ -2231,7 +2299,7 @@ const asChatTool = (entry, shown) => ({
 });
 const skillFunctionsFor = (chat) => {
     const active = skillsOf(chat);
-    const own = active.flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []), ...(RUNNER_SKILLS[skill.id] && skillRunnerReady() ? [runnerFunction(RUNNER_SKILLS[skill.id])] : [])].map((entry) => asChatTool(entry, () => skill.name)));
+    const own = active.flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []).filter((entry) => !entry.ready || entry.ready()), ...(RUNNER_SKILLS[skill.id] && skillRunnerReady() ? [runnerFunction(RUNNER_SKILLS[skill.id])] : [])].map((entry) => asChatTool(entry, () => skill.name)));
     const writes = sandboxReady() && active.some((skill) => SANDBOX_SKILLS[skill.id] || (skill.needs || []).includes('commands'));
     return writes ? [...own, asChatTool(programFunction(), (input) => `${['python', 'node', 'bash'].includes(input?.language) ? input.language : 'A'} program`)] : own;
 };
@@ -2462,7 +2530,7 @@ const openComponentTool = () => {
 };
 
 // A skill with functions of Mollama's own has its commands: they do what its scripts do.
-const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs: needs.filter((need) => !(SANDBOX_SKILLS[id] && sandboxReady()) && (need !== 'commands' || !SKILL_FUNCTIONS[id])), tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
+const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs: needs.filter((need) => !(SANDBOX_SKILLS[id] && sandboxReady()) && (need !== 'commands' || !(SKILL_FUNCTIONS[id] || []).some((entry) => !entry.ready || entry.ready()))), tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
 export const listSkills = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
     const all = [...SKILLS, ...await ownSkillsOf(req.user.id)];
@@ -2599,6 +2667,13 @@ const systemText = (chat) => {
 // prompt a computer has already read stays good for the rest of that day.
 export const todayLine = () => `Today is ${new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })} (UTC).`;
 
+// A page a reply showed earlier is long, and the model needs only to know it was shown: it is sent back as one line.
+const LONG_PAGE = 6000;
+const shortenPages = (text) => String(text).replace(/```component\n(<Frame\b[^>]*>)[\s\S]*?```/g, (block, opening) => {
+    if (block.length <= LONG_PAGE) return block;
+    const title = (opening.match(/\btitle="([^"]*)"/) || [])[1] || 'a page';
+    return `[Shown here: "${title}", a page of ${block.length.toLocaleString('en-GB')} characters, not repeated.]`;
+});
 const buildMessages = (chat, listing = false) => {
     const out = [];
     const active = sortSkills(chat, listing).full;
@@ -2606,7 +2681,7 @@ const buildMessages = (chat, listing = false) => {
     if (system) out.push({ role: 'system', content: system });
     for (const message of chat.messages) {
         if (!message.content) continue;
-        let content = message.content;
+        let content = message.role === 'assistant' ? shortenPages(message.content) : message.content;
         if (message.role === 'user' && message.attachmentIds.length > 0) {
             const documents = message.attachmentIds
                 .map((id) => chat.attachments.id(id))
@@ -2935,7 +3010,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const on = new Set(skillsOf(chat).map((skill) => skill.id));
         const others = skillsFor(chat.owner).filter((skill) => !on.has(skill.id));
         const draws = drawsComponents(chat);
-        const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0) : [];
+        // A skill that is only on by default offers its files once the model has opened it.
+        const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0 && (Array.isArray(chat.skills) || skill.default !== 'tools' || !listed.includes(skill))) : [];
         const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
