@@ -2547,6 +2547,10 @@ export const componentFaults = (text) => {
     const used = new Set();
     const known = Object.keys(COMPONENT_RULES);
     const exact = new Map(known.map((name) => [name.toLowerCase(), name]));
+    // Tags written as plain text, outside any fence, are shown as text and drawn as nothing.
+    const outside = String(text).replace(/```[\s\S]*?(```|$)/g, '');
+    const bare = outside.match(new RegExp(`^\\s*<(${TOP_COMPONENTS.join('|')})\\b`, 'm'));
+    if (bare) faults.push(`<${bare[1]}> is written as plain text, so it shows as text and is not drawn. Put component tags inside a code fence that starts with \`\`\`component.`);
     for (const block of componentBlocks(text)) {
         // Some models put program code or their own words in a component block, which draws nothing.
         if (!/^\s*<[A-Za-z]/.test(block)) {
@@ -2562,6 +2566,7 @@ export const componentFaults = (text) => {
                 continue;
             }
             if (TOP_COMPONENTS.includes(name)) used.add(name);
+            if (name === 'Button' && /\/\s*$/.test(match[2])) faults.push('A Button holds its label as text between its tags, like <Button send="Show the wiring">Show the wiring</Button>; yours has none.');
             const attributes = new Map([...match[2].matchAll(/([A-Za-z_][\w-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+)))?/g)].map((found) => [found[1], found[2] ?? found[3] ?? found[4] ?? true]));
             for (const need of COMPONENT_RULES[name]) {
                 if (!attributes.has(need) || attributes.get(need) === '') faults.push(`${name} needs the attribute "${need}".`);
