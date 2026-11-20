@@ -1642,7 +1642,8 @@ export const SKILL_SOURCES = {
     hairline: { name: 'Hairline', repo: 'lucasmarkes/hairline' },
     taste: { name: 'Taste (Leonxlnx)', repo: 'Leonxlnx/taste-skill' },
     richmd: { name: 'Rich Markdown First', repo: 'xronocode/rich-md-skill' },
-    explainer: { name: 'Visual Explainer', repo: 'nicobailon/visual-explainer' }
+    explainer: { name: 'Visual Explainer', repo: 'nicobailon/visual-explainer' },
+    cadsmith: { name: 'CadSmith (Jonathan Fermin)', repo: 'JonFermin/cadsmith' }
 };
 const LIBRARY = path.join(INSTRUCTIONS, 'library');
 // The text of one of a skill's files, or null when the skill has no such file. Only a path from the skill's own list
@@ -2260,7 +2261,7 @@ const explainerBlock = (page, title) => {
 const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'marketing-conversion-tracking': 'conversion-tracking' };
 // The skills whose own files are in the sandbox snapshot, by their folder there (/root/skills/<folder>). With sandboxes
 // set up, these lack nothing: their commands run, as programs a model writes, beside their files.
-const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy', 'explainer-visual-explainer': 'visual-explainer' };
+const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy', 'explainer-visual-explainer': 'visual-explainer', 'cadsmith-make-model': 'cadsmith', 'cadsmith-make-mechanism': 'cadsmith', 'cadsmith-edit-model': 'cadsmith', 'cadsmith-export-model': 'cadsmith' };
 // Whose files a reply may reach: the sign-in of the person who sent the message.
 const filesScope = new AsyncLocalStorage();
 const personFiles = () => createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore() });

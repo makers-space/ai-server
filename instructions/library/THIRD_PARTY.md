@@ -82,6 +82,14 @@ https://github.com/ItzCrazyKns/Perplexica (MIT, Copyright (c) 2026 ItzCrazyKns) 
 
 1 skill, in `search`: Web Search. Unlike the other skills it is not a copy. It is written for Mollama's two search tools and follows two published prompts: when to search and how to make a search stand on its own follow Perplexica's search classifier; how to answer from results follows Morphic's quick search mode, without its fixed headings, its citation on every sentence and its closing summary.
 
+## JonFermin/cadsmith
+
+https://github.com/JonFermin/cadsmith
+
+4 skills, in `cadsmith`. Licence: MIT. Copyright (c) 2026 Jonathan Fermin.
+
+Taken from `.claude/skills` at commit 00c334dd4202, each page unchanged. Beside each page are the files of the repository it names, copied unchanged at the same commit: Make Model's build123d guide, Make Mechanism's `mech` package, examples and previewer source, Edit Model's two agent pages, and Export Model's pipeline scripts. In the sandbox the whole repository is in `/root/skills/cadsmith`, with its `mech` command installed. Edit Model's review and fix agents and Export Model's Blender step are not available in Mollama.
+
 ## MIT License
 
 Applies to every project above marked MIT, each under its own copyright line.
