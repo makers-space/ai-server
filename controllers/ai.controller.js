@@ -1850,6 +1850,52 @@ const noteTool = (chat) => ({
 });
 // Saves something a model made, or a file it found at a web address, to the person's FilesystemOne. It writes to
 // their files, so it asks first.
+// Looking through the person's files and reading one only reads, so neither asks: FilesystemOne itself decides what
+// their sign-in may see. A path not found as given is tried again inside their own folder.
+const FILE_TEXT_CHARS = 40000;
+const fileTool = (fn, label, doing, description, properties, run) => ({
+    fn,
+    label,
+    doing,
+    shown: (input) => clip(String(input?.path ?? input?.folder ?? '/'), 160),
+    definition: { type: 'function', function: { name: fn, description, parameters: { type: 'object', properties } } },
+    run: async (input) => {
+        try {
+            return await run(personFiles(), input);
+        } catch (error) {
+            const failure = error instanceof OllamaError ? error : new OllamaError('FILE_NOT_FOUND', error.message);
+            return { content: `Nothing was read: ${failure.toJSON().message}`, failed: 'failed' };
+        }
+    }
+});
+const homeFirst = async (given, read) => {
+    const asked = `/${String(given || '').split('/').filter((part) => part && part !== '.' && part !== '..').join('/')}`;
+    const inside = inHome(asked);
+    try {
+        return await read(asked === '/' ? inside : asked);
+    } catch (error) {
+        if (inside === asked) throw error;
+        return read(inside);
+    }
+};
+const listFilesTool = () => fileTool('list_my_files', 'List files', 'Looking in your files…',
+    "List what is in a folder of the user's FilesystemOne files: each folder and file with its full path and size. Left out, the user's own top folder.",
+    { folder: { type: 'string', description: 'The folder, such as /Drawings' } },
+    async (files, input) => {
+        const first = await homeFirst(input?.folder, (folder) => files.browse(folder));
+        const inside = inHome(input?.folder || '/');
+        const entries = first.length === 0 && inside !== `/${String(input?.folder || '').split('/').filter(Boolean).join('/')}` ? await files.browse(inside).catch(() => first) : first;
+        if (entries.length === 0) return { content: 'That folder is empty.' };
+        return { content: clip(entries.map((entry) => `${entry.type} ${entry.path}${entry.type === 'file' ? ` (${Math.max(1, Math.round(entry.size / 1024))} KB)` : ''}`).join('\n'), 8000) };
+    });
+const readFileTool = () => fileTool('read_my_file', 'Read a file', 'Reading your file…',
+    "Read one of the user's FilesystemOne files as text: documents, PDFs, Word files, spreadsheets as text, code and notes. Give its full path; list_my_files shows the paths.",
+    { path: { type: 'string', description: 'The file, such as /Notes/plan.md' } },
+    async (files, input) => {
+        if (!String(input?.path ?? '').trim()) return { content: 'Nothing was read. Give the path of a file, such as /Notes/plan.md.', failed: 'failed' };
+        const file = await homeFirst(input.path, (path) => files.text(path));
+        return { content: `${file.name}:\n\n${clip(file.text, FILE_TEXT_CHARS)}` };
+    });
 const SAVE_STEP = 'Save to files';
 const saveToFilesTool = () => ({
     fn: 'save_to_files',
@@ -3188,7 +3234,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const draws = drawsComponents(chat);
         // A skill that is only on by default offers its files once the model has opened it.
         const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0 && (Array.isArray(chat.skills) || skill.default !== 'tools' || !listed.includes(skill))) : [];
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(process.env.FILESYSTEM_ONE_URL ? [saveToFilesTool()] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(process.env.FILESYSTEM_ONE_URL ? [listFilesTool(), readFileTool(), saveToFilesTool()] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -3387,6 +3433,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         step.failed = outcome.failed;
                         write({ type: 'toolFailed', failed: outcome.failed });
                     }
+                    // What came back, kept short on the step so the person can open it.
+                    step.answer = clip(String(outcome.content ?? ''), STEP_ANSWER_CHARS);
+                    write({ type: 'toolAnswer', answer: step.answer });
                     if (!outcome.failed && !results.has(same)) results.set(same, String(outcome.content ?? ''));
                     const pictures = Array.isArray(outcome.images) && outcome.images.length > 0 ? outcome.images : null;
                     const seesPictures = facts.capabilities.includes('vision');
@@ -4247,6 +4296,7 @@ export const removeProvider = asyncHandler(async (req, res) => {
 // Tools a chat has switched on. Built-in ones are functions here; the rest come from the person's tool servers.
 const MAX_CHAT_TOOLS = 40;
 const TOOL_RESULT_CHARS = 20000;
+const STEP_ANSWER_CHARS = 1500;
 const TOOL_CALLS_AN_HOUR = 120;
 const PERMISSION_WAIT_MS = 3 * 60 * 1000;
 
