@@ -1693,7 +1693,7 @@ const skillSetup = (skill) => {
 // Library skills that are on in a chat until the person chooses its skills. 'tools' means only for a model that can
 // use tools: such a model is shown just the skill's name and description and opens it when a request fits, where a
 // model that cannot use tools would be sent the whole skill with every message.
-export const DEFAULT_LIBRARY_SKILLS = { 'taste-taste-skill': 'tools' };
+export const DEFAULT_LIBRARY_SKILLS = {};
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
     const head = text.match(/^---\n([\s\S]*?)\n---\n/);
