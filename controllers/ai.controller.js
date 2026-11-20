@@ -4407,13 +4407,19 @@ const callServerTool = async (server, name, input) => {
 };
 
 const toolCalls = new Map();
+let toolCallLimit = TOOL_CALLS_AN_HOUR;
+// For tests: a lower limit, with every person's count started again; null puts the real limit back.
+export const setToolCallLimit = (limit) => {
+    toolCallLimit = limit ?? TOOL_CALLS_AN_HOUR;
+    toolCalls.clear();
+};
 const underLimit = (userId) => {
     const now = Date.now();
     const kept = toolCalls.get(String(userId));
     const window = kept && now - kept.since < 60 * 60 * 1000 ? kept : { since: now, count: 0 };
     window.count += 1;
     toolCalls.set(String(userId), window);
-    return window.count <= TOOL_CALLS_AN_HOUR;
+    return window.count <= toolCallLimit;
 };
 
 // A tool that changes something waits here until the person allows or refuses it; no answer in time is a refusal.
