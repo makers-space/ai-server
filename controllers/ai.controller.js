@@ -2211,13 +2211,16 @@ const reportRun = (title, answer, saved) => {
     const content = [`${title} ${ended}.`, answer.stdout && `It printed:\n${clip(answer.stdout, 6000)}`, answer.stderr && `Errors:\n${clip(answer.stderr, 3000)}`, saved, left].filter(Boolean).join('\n\n');
     return { content, ...(answer.timedOut || answer.exitCode !== 0 ? { failed: 'failed' } : {}) };
 };
+// A call touches the person's files only when it names files to send or a folder to save into: with neither, nothing
+// of theirs is read and what it makes is not saved, so it runs without asking.
+const touchesFiles = (input) => (Array.isArray(input?.files) && input.files.some((one) => String(one).trim())) || Boolean(String(input?.save_to ?? '').trim());
 const filesParameter = { type: 'array', items: { type: 'string' }, description: 'FilesystemOne paths of the files it works on, such as /docs/report.docx' };
 const saveParameter = { type: 'string', description: 'The FilesystemOne folder for the files it makes. Left out, the folder of the first file.' };
 const runnerFunction = (kind) => ({
     name: `${kind.replace(/-/g, '_')}_script`,
     label: `${kind} script`,
     doing: 'Running the script…',
-    changes: true,
+    changes: touchesFiles,
     description: `Runs one of the ${kind} skill's own scripts, as the skill writes it (\`python scripts/...\` or \`node scripts/...\`), on files from the user's FilesystemOne. Give the script's path inside the skill, its arguments, and the FilesystemOne path of every file it works on: each is put in an empty folder under its own file name, so name it that way in the arguments. Files the script makes or changes are saved to save_to, or beside the first file. Only the skill's own scripts run; a script that needs LibreOffice or poppler fails and says so, and a program you write yourself cannot be run here.`,
     parameters: {
         type: 'object',
@@ -2253,14 +2256,14 @@ const runnerFunction = (kind) => ({
     }
 });
 // A program the model writes, run in a sandbox: what most skills' commands come to, and what a skill that has the model
-// write its own build or check needs. It writes to the person's files, so it asks first.
+// write its own build or check needs. One that reads or writes the person's files asks first.
 const MAX_PROGRAM_CHARS = 100000;
 const programFunction = () => ({
     name: 'run_program',
     label: 'Program',
     doing: 'Running the program…',
-    changes: true,
-    description: `Runs a program you write in a computer of its own that has no network and is thrown away afterwards, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. Nothing is kept from one call to the next, so do the whole job in one program, which may run for up to five minutes.`,
+    changes: touchesFiles,
+    description: `Runs a program you write in a computer of its own that has no network and is thrown away afterwards, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. The user is asked first only when it is given files or save_to; a program with neither, such as one that looks around or checks something, runs straight away. Nothing is kept from one call to the next, so do the whole job in one program, which may run for up to five minutes.`,
     parameters: {
         type: 'object',
         properties: {
@@ -2299,7 +2302,7 @@ const asChatTool = (entry, shown) => ({
     fn: entry.name,
     label: entry.label,
     doing: entry.doing,
-    changes: Boolean(entry.changes),
+    changes: typeof entry.changes === 'function' ? entry.changes : Boolean(entry.changes),
     shown,
     definition: { type: 'function', function: { name: entry.name, description: entry.description, parameters: entry.parameters } },
     run: async (input, context) => entry.run(input, context)
@@ -4128,7 +4131,8 @@ export const answerPermission = asyncHandler(async (req, res) => {
 const runChatTool = async (tool, input, { chat, userId, write, stopped, show, kept }) => {
     try {
         if (!underLimit(userId)) return { content: 'The limit on tool use for this hour has been reached. Answer without tools and say so.', failed: 'limited' };
-        if (tool.changes && !(chat.allowedTools || []).includes(tool.fn)) {
+        const changes = typeof tool.changes === 'function' ? tool.changes(input) : tool.changes;
+        if (changes && !(chat.allowedTools || []).includes(tool.fn)) {
             const answer = await askPermission(chat, tool, input, write);
             if (stopped()) return { content: 'The reply was stopped.', failed: 'refused' };
             if (answer === 'no') return { content: 'The person did not allow this tool to run. Do not try another way to do the same thing; say that it was not done.', failed: 'refused' };
