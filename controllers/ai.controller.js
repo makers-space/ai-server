@@ -1834,6 +1834,44 @@ const noteTool = (chat) => ({
         return { content: `Kept the note "${key}". It is shown to you with every message of this chat from now on.` };
     }
 });
+// Saves something a model made, or a file it found at a web address, to the person's FilesystemOne. It writes to
+// their files, so it asks first.
+const SAVE_STEP = 'Save to files';
+const saveToFilesTool = () => ({
+    fn: 'save_to_files',
+    label: SAVE_STEP,
+    doing: 'Saving to your files…',
+    changes: true,
+    shown: (input) => clip(`${String(input?.folder ?? '').replace(/\/+$/, '')}/${String(input?.name ?? '')}`, 160),
+    definition: {
+        type: 'function',
+        function: {
+            name: 'save_to_files',
+            description: "Save a file to the user's FilesystemOne: a page, a figure, a diagram's text, a table as CSV, code or notes you made (give content), or a picture, video or document you found on the web (give address). The user is asked first. A name already taken in that folder is not overwritten; the file is given a new name.",
+            parameters: { type: 'object', properties: { folder: { type: 'string', description: 'The folder, such as /Drawings' }, name: { type: 'string', description: 'The file name with its extension, such as engine.html' }, content: { type: 'string', description: 'The whole text of the file, when you made it' }, address: { type: 'string', description: 'The https address of a file on the web, when you found it' } }, required: ['folder', 'name'] }
+        }
+    },
+    run: async (input) => {
+        const folder = String(input?.folder ?? '').trim();
+        const name = String(input?.name ?? '').trim();
+        const content = typeof input?.content === 'string' ? input.content : '';
+        const address = String(input?.address ?? '').trim();
+        if (!folder.startsWith('/') || folder === '/' || !name || /[\\/\0]/.test(name)) return { content: 'Nothing was saved. Give a folder such as /Drawings (not the top level) and a file name with no slashes.', failed: 'failed' };
+        if (!content && !address) return { content: 'Nothing was saved. Give the content of the file, or the address of a file on the web.', failed: 'failed' };
+        const files = personFiles();
+        try {
+            if (address) {
+                await files.upload(folder, [{ path: name, buffer: await readAddress(address) }]);
+                return { content: `Saved the file from ${clip(address, 200)} to ${folder.replace(/\/+$/, '')}/${name}. If that name was taken, it was given a new one.` };
+            }
+            const saved = await files.save(folder, name, content);
+            return { content: `Saved to ${saved.path}.` };
+        } catch (error) {
+            const failure = error instanceof OllamaError ? error : new OllamaError('FILE_NOT_SAVED', error.message);
+            return { content: `Nothing was saved: ${failure.toJSON().message}`, failed: 'failed' };
+        }
+    }
+});
 // A question for the person, shown with choices they can press. Asking ends the reply: their answer is the next message.
 const ASK_STEP = 'Question';
 const askUserTool = () => ({
@@ -1867,6 +1905,7 @@ const DOING = {
     open_skill: 'Opening a skill…',
     open_skill_file: "Reading one of a skill's files…",
     save_note: 'Keeping a note…',
+    save_to_files: 'Saving to your files…',
     open_component: 'Reading how to draw a component…',
     find_skill: 'Looking in the skill library…',
     calculator: 'Working out a sum…',
@@ -3097,7 +3136,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const draws = drawsComponents(chat);
         // A skill that is only on by default offers its files once the model has opened it.
         const withFiles = facts.capabilities.includes('tools') ? skillsOf(chat).filter((skill) => (skill.files || []).length > 0 && (Array.isArray(chat.skills) || skill.default !== 'tools' || !listed.includes(skill))) : [];
-        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
+        const chatTools = facts.capabilities.includes('tools') ? [...(draws ? [openComponentTool()] : []), ...(withFiles.length > 0 ? [skillFileTool(withFiles)] : []), ...skillFunctionsFor(chat), ...(listed.length > 0 ? [openSkillTool(listed)] : []), ...(others.length > 0 ? [findSkillTool(others)] : []), askUserTool(), noteTool(chat), ...(process.env.FILESYSTEM_ONE_URL ? [saveToFilesTool()] : []), ...(await toolsForChat(chat, userId)).filter((tool) => !(searching && tool.fn === 'read_web_page'))] : [];
         const capacity = capacityFor(chat, facts);
         const sizeFor = (list, extra = 0) => {
             const fitted = CONTEXT_STEPS.find((step) => step >= promptTokens(list) + REPLY_RESERVE + extra) || capacity;
@@ -3862,6 +3901,40 @@ export const loadRemote = asyncHandler(async (req, res) => {
     });
     remote.stream.on('error', () => res.destroy());
     remote.stream.pipe(res);
+});
+
+// A file at a web address, read whole and kept to the size a chat may show, for saving to the person's files.
+const readAddress = async (address) => {
+    const remote = await fetchRemote(address);
+    const pieces = [];
+    let total = 0;
+    for await (const chunk of remote.stream) {
+        total += chunk.length;
+        if (total > MAX_REMOTE_BYTES) {
+            remote.stream.destroy();
+            throw new OllamaError('REMOTE_TOO_LARGE');
+        }
+        pieces.push(chunk);
+    }
+    return Buffer.concat(pieces);
+};
+
+// Saves what a reply showed from a web address, such as a picture or a video, to the person's FilesystemOne. A name
+// already taken there is not overwritten; the file is given a new name.
+export const saveFileFromAddress = asyncHandler(async (req, res) => {
+    let buffer;
+    try {
+        buffer = await readAddress(req.body.url);
+    } catch (error) {
+        return sendOllamaError(res, error instanceof OllamaError ? error : new OllamaError('REMOTE_FAILED', error.message));
+    }
+    try {
+        await filesFor(req).upload(req.body.folder, [{ path: req.body.name, buffer }]);
+        const where = `${req.body.folder.replace(/\/+$/, '')}/${req.body.name}`;
+        res.status(201).json({ success: true, path: where, message: `Saved to ${where}` });
+    } catch (error) {
+        sendOllamaError(res, error);
+    }
 });
 
 export const saveFile = asyncHandler(async (req, res) => {

@@ -55,6 +55,7 @@ router.validRoutes = [
     '/api/v1/files/text',
     '/api/v1/files/save',
     '/api/v1/files/remote',
+    '/api/v1/files/save-address',
     '/api/v1/providers',
     '/api/v1/providers/:id',
     '/api/v1/providers/:id/check',
@@ -145,6 +146,7 @@ router.get('/files/browse', ...signedIn, validateRequest(chatSchemas.browse, 'qu
 router.get('/files/text', ...signedIn, validateRequest(chatSchemas.fileText, 'query'), aiController.readFileText);
 router.get('/files/remote', ...signedIn, validateRequest(chatSchemas.remote, 'query'), aiController.loadRemote);
 router.post('/files/save', ...signedIn, validateRequest(chatSchemas.fileSave), aiController.saveFile);
+router.post('/files/save-address', ...signedIn, validateRequest(chatSchemas.fileSaveAddress), aiController.saveFileFromAddress);
 
 const withToolServerId = validateRequest(toolSchemas.serverId, 'params');
 router.get('/tools/callback', aiController.requireDatabase, validateRequest(toolSchemas.callback, 'query'), aiController.finishToolServerSignIn);

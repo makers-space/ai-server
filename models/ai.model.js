@@ -455,6 +455,11 @@ export const chatSchemas = {
     browse: Joi.object({ path: filePath.default('/') }),
     remote: Joi.object({ url: Joi.string().uri({ scheme: ['http', 'https'] }).max(2000).required() }),
     fileText: Joi.object({ path: filePath.required(), model: modelName }),
+    fileSaveAddress: Joi.object({
+        folder: filePath.required(),
+        name: Joi.string().trim().min(1).max(200).pattern(/^[^\\/\0]+$/).required(),
+        url: Joi.string().uri({ scheme: ['https'] }).max(2000).required()
+    }),
     fileSave: Joi.object({
         folder: filePath.required(),
         name: Joi.string().trim().min(1).max(200).pattern(/^[^\\/\0]+$/).required(),
