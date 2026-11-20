@@ -1690,6 +1690,10 @@ const skillSetup = (skill) => {
         libraries: [...new Set(libraries)].slice(0, 40)
     };
 };
+// Library skills that are on in a chat until the person chooses its skills. 'tools' means only for a model that can
+// use tools: such a model is shown just the skill's name and description and opens it when a request fits, where a
+// model that cannot use tools would be sent the whole skill with every message.
+export const DEFAULT_LIBRARY_SKILLS = { 'taste-taste-skill': 'tools' };
 const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSync(path.join(LIBRARY, source))).flatMap((source) => fs.readdirSync(path.join(LIBRARY, source)).filter((file) => file.endsWith('.md')).sort().map((file) => {
     const text = fs.readFileSync(path.join(LIBRARY, source, file), 'utf8').replace(/\r\n/g, '\n');
     const head = text.match(/^---\n([\s\S]*?)\n---\n/);
@@ -1703,7 +1707,7 @@ const LIBRARY_SKILLS = Object.keys(SKILL_SOURCES).filter((source) => fs.existsSy
         id: file.slice(0, -3),
         name,
         description: facts.description || '',
-        default: false,
+        default: DEFAULT_LIBRARY_SKILLS[file.slice(0, -3)] || false,
         order: 100,
         credit: `${SKILL_SOURCES[source].repo} (${facts.licence})`,
         source,
@@ -1749,7 +1753,7 @@ const skillsOf = (chat) => skillsFor(chat.owner).filter((skill) => (Array.isArra
 const SKILL_STEP = 'Skill';
 const sortSkills = (chat, listing) => {
     const active = skillsOf(chat);
-    if (!listing) return { full: active, listed: [] };
+    if (!listing) return { full: active.filter((skill) => Array.isArray(chat.skills) || skill.default !== 'tools'), listed: [] };
     const opened = new Set(chat.messages.flatMap((message) => (message.steps || []).filter((step) => step.tool === SKILL_STEP && !step.failed).map((step) => step.input)));
     const full = active.filter((skill) => skill.source === 'mollama' || opened.has(skill.name));
     return { full, listed: active.filter((skill) => !full.includes(skill)) };
@@ -2882,7 +2886,9 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
             write({ type: 'token', text });
         };
         const thinkRoom = facts.capabilities.includes('thinking') ? THINK_RESERVE : 0;
-        const numCtx = sizeFor(messages, thinkRoom + listed.reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
+        // A skill that is only on by default is not given room ahead: most chats never open it, and the room grows
+        // by itself in the round after one is opened.
+        const numCtx = sizeFor(messages, thinkRoom + listed.filter((skill) => Array.isArray(chat.skills) || skill.default !== 'tools').reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
         // The room a model is given grows with what the reply has gathered: a skill it opened, a file it read.
         let room = numCtx;
         let grew = false;
