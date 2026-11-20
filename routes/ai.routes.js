@@ -69,6 +69,8 @@ router.validRoutes = [
 
 const signedIn = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.USE_MODELS), noCacheResponse(), aiController.useDevice];
 const manager = [aiController.requireDatabase, authMiddleware.verifyToken(), authMiddleware.checkPermission(RIGHTS.MANAGE_MODELS), noCacheResponse(), aiController.useDevice];
+// Removing or downloading a model goes only to the computer the request names.
+const confirmed = [...manager.slice(0, -1), aiController.useNamedDevice];
 const withDeviceId = validateRequest(deviceSchemas.deviceId, 'params');
 
 router.use('/devices', aiController.announceChanges('device:changed'));
@@ -95,13 +97,13 @@ const named = validateRequest(modelSchemas.named);
 router.get('/models', ...signedIn, aiController.listModels);
 router.get('/models/running', ...signedIn, aiController.listRunning);
 router.post('/models/show', ...signedIn, named, aiController.showModel);
-router.post('/models/delete', ...manager, named, aiController.deleteModel);
+router.post('/models/delete', ...confirmed, named, aiController.deleteModel);
 router.post('/models/unload', ...manager, named, aiController.unloadModel);
 router.post('/models/load', ...signedIn, validateRequest(modelSchemas.load), aiController.loadModel);
 router.post('/models/create', ...manager, validateRequest(modelSchemas.create), aiController.createModel);
 router.post('/models/update', ...manager, validateRequest(modelSchemas.update), aiController.updateModel);
 
-router.post('/models/pull', ...manager, named, aiController.startDownload);
+router.post('/models/pull', ...confirmed, named, aiController.startDownload);
 router.get('/models/downloads', ...signedIn, aiController.listDownloads);
 router.get('/models/downloads/stream', ...signedIn, aiController.streamDownloads);
 router.post('/models/downloads/cancel', ...manager, validateRequest(modelSchemas.downloadAction), aiController.changeDownload);

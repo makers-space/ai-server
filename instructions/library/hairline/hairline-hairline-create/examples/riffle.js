@@ -3,7 +3,9 @@
  * stands up and lifts; the ones in front lean forward and the ones behind lean
  * back, staggered outwards from it on the 700ms lift curve. Each card's number
  * is punched on its tab in a 4 × 2 grid, and goes to the read-out when the
- * card is pulled. The slider is the stagger, in ms.
+ * card is pulled. The slider is the stagger, in ms. Its own controls: lean
+ * (how far the neighbours tip), lift (whether the pulled card rises) and deal
+ * (pull a card at random), each answered in input(id, value).
  *
  * The pattern: discrete items. Tweens, a stagger by distance, identity carried
  * by geometry, and a hit test on static bands along the resting top edges, so
@@ -70,9 +72,9 @@ function pose(P, i, t0, shape, th, lift) {
   };
 }
 
-function mount({ stage, svg, read }, value) {
+function mount({ stage, svg, read, controls = {} }, value) {
   const bag = disposer();
-  let stag = value;
+  let stag = value, lean = controls.lean ?? 1, lifts = controls.lift ?? true;
 
   // The camera is fitted to the tray with a card lifted, so nothing leaves the frame in any pose.
   const C = Cam(45, 0.5, 1.62);
@@ -132,14 +134,14 @@ function mount({ stage, svg, read }, value) {
   let act = -1;
   const caption = (a) => (a < 0 ? "rest" : String(N - a).padStart(2, "0"));
   /** Pulls card a (-1 puts them all back). The stagger spreads out from the card pulled, or the one let go. */
-  function setActive(a) {
-    if (a === act) return;
+  function setActive(a, again = false) {
+    if (a === act && !again) return;
     const now = performance.now(), from = a >= 0 ? a : act;
     act = a;
     cards.forEach((cd, i) => {
       const delay = Math.abs(i - from) * stag;
-      const th = a < 0 ? REST : i < a ? BACK : i > a ? FWD : 0;
-      tset(cd.a, th, now, delay); tset(cd.z, a === i ? LIFT : 0, now, delay);
+      const th = a < 0 ? REST : i < a ? BACK * lean : i > a ? FWD * lean : 0;
+      tset(cd.a, th, now, delay); tset(cd.z, a === i && lifts ? LIFT : 0, now, delay);
       cd.face.classList.toggle("hi", i === a); cd.head.classList.toggle("hi", i === a); cd.punch[cd.n - 1].classList.toggle("m", i !== a);
     });
     read.textContent = caption(a);
@@ -151,6 +153,12 @@ function mount({ stage, svg, read }, value) {
 
   return {
     set: (v) => { stag = v; },
+    input: (id, v) => {
+      if (id === "deal") return setActive((Math.max(act, 0) + 1 + Math.floor(Math.random() * (N - 1))) % N);
+      if (id === "lean") lean = v;
+      if (id === "lift") lifts = v;
+      setActive(act, true);
+    },
     destroy: bag.dispose,
   };
 }
@@ -160,6 +168,13 @@ hairline({
   means: "Eight cards in a tray: the one under the pointer stands up, and its neighbours lean away in turn.",
   rules: [1, 2, 8, 10],
   range: [0, 40, 90],
+  label: "stagger ms",
+  physics: { stiffness: 1.2, damping: 0.9, speed: 1 },
+  controls: [
+    { id: "lean", kind: "slider", label: "lean", min: 0, max: 1.5, step: 0.05, value: 1 },
+    { id: "lift", kind: "switch", label: "lift", value: true },
+    { id: "deal", kind: "button", label: "deal" },
+  ],
   tour: [[160, 160], [200, 120], [280, 120], null],
   mount,
 });

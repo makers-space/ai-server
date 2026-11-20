@@ -1,4 +1,4 @@
-/* hairline kernel sha256:346b48bdef2cdfafd5343eba01494255cf75f9c078e6fcd1aafc62bab62980a1 */
+/* hairline kernel sha256:ba43117ef91a5e4590cd18300452cec0fa6c321658438bf5d58ab626b752cd91 */
 /*
  * HL: everything a figure may call. Read this index; the code under it is the
  * package's src/core, unchanged, and a figure should not need to read it.
@@ -54,6 +54,10 @@
  *   EASE_LIFT                              the lift curve itself
  *   reducedMotion()                        true when the reader asked for less motion; springs and tweens already land at once
  *   setReducedMotion(on)                   the loop's business, not a figure's
+ * Physics: the bench's sliders, shared by every spring, tween and tour on the page
+ *   physics()                              {stiffness, damping, speed}, each 1 by default; read-only for a figure
+ *   setPhysics(o)                          the bench's business: stiffness scales every spring's k, damping its c,
+ *                                          speed its time and every tween's length (set after the change) and the tour's pace
  * Drawing
  *   mk(tag, attrs, parent)                 one svg element: the only way a figure makes a node
  *   solid(parent)                          {g, sil, cr}: a group holding a silhouette path and a crease path
@@ -123,6 +127,7 @@ var HL = (() => {
     mk: () => mk,
     open: () => open,
     place: () => place,
+    physics: () => physics,
     pointer: () => pointer,
     poly: () => poly,
     prism: () => prism,
@@ -138,6 +143,7 @@ var HL = (() => {
     rrect: () => rrect,
     run: () => run,
     seg: () => seg,
+    setPhysics: () => setPhysics,
     setReducedMotion: () => setReducedMotion,
     solid: () => solid,
     spring: () => spring,
@@ -288,6 +294,13 @@ var HL = (() => {
     reduced = on;
   };
   var reducedMotion = () => reduced;
+  var feel = { stiffness: 1, damping: 1, speed: 1 };
+  var FEEL = { stiffness: [0.2, 4], damping: [0.2, 4], speed: [0.1, 4] };
+  var physics = () => ({ ...feel });
+  var setPhysics = (o = {}) => {
+    for (const key in FEEL) if (Number.isFinite(o[key])) feel[key] = clamp(o[key], FEEL[key][0], FEEL[key][1]);
+    boards.forEach((b) => wake(b));
+  };
   function spring(x, o = {}) {
     return { x, v: 0, t: x, k: o.k ?? 100, c: o.c ?? 18, m: o.m ?? 1, eps: o.eps ?? 0.01 };
   }
@@ -297,9 +310,10 @@ var HL = (() => {
       sp.v = 0;
       return false;
     }
-    const n = Math.max(1, Math.ceil(dt * 240)), h = dt / n;
+    const span = dt * feel.speed, kk = sp.k * feel.stiffness, cc = sp.c * feel.damping;
+    const n = Math.max(1, Math.ceil(span * 240)), h = span / n;
     for (let i = 0; i < n; i++) {
-      const a = (-sp.k * (sp.x - sp.t) - sp.c * sp.v) / sp.m;
+      const a = (-kk * (sp.x - sp.t) - cc * sp.v) / sp.m;
       sp.v += a * h;
       sp.x += sp.v * h;
     }
@@ -349,7 +363,9 @@ var HL = (() => {
     if (tw.to === to) return;
     tw.from = tval(tw, now);
     tw.to = to;
-    tw.t0 = now + delay;
+    tw.base = tw.base ?? tw.dur;
+    tw.dur = tw.base / feel.speed;
+    tw.t0 = now + delay / feel.speed;
   };
   var tdone = (tw, now) => reduced || now >= tw.t0 + tw.dur;
 
@@ -549,7 +565,8 @@ var HL = (() => {
       t = -1;
       handlers.get(stage)?.leave(GHOST);
     };
-    const tick = (dt) => {
+    const tick = (step) => {
+      const dt = step * feel.speed;
       if (hand || keys || !stops.length) return false;
       if (reducedMotion()) {
         if (at) leave();

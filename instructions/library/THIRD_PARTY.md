@@ -76,6 +76,8 @@ The Hairline Create skill also comes with the files its instructions name, in `h
 
 The checks of its `validate.mjs` are also reproduced word for word in `server/controllers/ai.controller.js` (`hairlineFaults`), so the Hairline build function can make them without running a script.
 
+Changed for Mollama on 2026-11-20, as the MIT licence allows: `bench.html` has no theme button, an icon-only play button, a label for its main slider, up to four controls a figure declares (switch, select, button, slider) and spring, damping and speed sliders; `kernel.js` has `physics()` and `setPhysics()`, which those sliders drive (its sha256 line is written for the changed file); `validate.mjs` checks a figure's `label` and `controls`, and `examples/riffle.js` shows three controls. The skill's instructions say so. The same files are in `mkrspc-python/skills/hairline-create` for the sandbox.
+
 ## ItzCrazyKns/Perplexica and miurla/morphic
 
 https://github.com/ItzCrazyKns/Perplexica (MIT, Copyright (c) 2026 ItzCrazyKns) and https://github.com/miurla/morphic (Apache License 2.0)

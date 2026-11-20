@@ -20,14 +20,17 @@
   }
   main { width: 100%; max-width: 640px; }
   .plate { position: relative; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
-  .tag, .label, output, button { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.02em; }
+  .tag, .label, output, button, select { font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.02em; }
   .tag { position: absolute; top: 12px; z-index: 1; color: var(--muted); pointer-events: none; }
   #name { left: 14px; }
   #read { right: 14px; color: var(--ink); font-variant-numeric: tabular-nums; }
-  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 14px; }
-  .label { color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-top: 12px; }
+  .controls[hidden] { display: none; }
+  .control { display: inline-flex; align-items: center; gap: 6px; flex: 1 1 140px; min-width: 0; }
+  .control.fixed { flex: 0 0 auto; }
+  .label { color: var(--muted); white-space: nowrap; }
   input[type="range"] {
-    flex: 1 1 96px; min-width: 0; height: 32px; margin: 0; background: transparent; cursor: pointer;
+    flex: 1 1 64px; min-width: 0; height: 28px; margin: 0; background: transparent; cursor: pointer;
     -webkit-appearance: none; appearance: none;
   }
   input[type="range"]::-webkit-slider-runnable-track { height: 1px; background: var(--muted); }
@@ -37,13 +40,31 @@
   }
   input[type="range"]::-moz-range-track { height: 1px; background: var(--muted); }
   input[type="range"]::-moz-range-thumb { width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--ink); background: var(--ground); }
-  input[type="range"]:focus-visible, button:focus-visible { outline: 1.5px solid var(--ink); outline-offset: 2px; }
-  output { min-width: 4ch; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type="range"]:focus-visible, button:focus-visible, select:focus-visible, input[role="switch"]:focus-visible { outline: 1.5px solid var(--ink); outline-offset: 2px; }
+  output { min-width: 5ch; text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
   button {
-    height: 32px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px;
+    height: 28px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px;
     background: transparent; color: var(--ink); cursor: pointer;
   }
+  button:active { background: color-mix(in srgb, var(--ink) 10%, transparent); }
+  #play { width: 28px; padding: 0; display: inline-grid; place-items: center; }
+  #play svg { width: 12px; height: 12px; fill: currentColor; }
   #play[aria-pressed="true"] { background: var(--ink); color: var(--ground); border-color: var(--ink); }
+  select {
+    height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--ground); color: var(--ink); cursor: pointer;
+  }
+  input[role="switch"] {
+    -webkit-appearance: none; appearance: none; position: relative; flex: 0 0 auto; width: 28px; height: 16px; margin: 0;
+    border: 1px solid var(--muted); border-radius: 8px; background: transparent; cursor: pointer;
+  }
+  input[role="switch"]::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted); transition: transform 0.18s ease, background 0.18s ease;
+  }
+  input[role="switch"]:checked { border-color: var(--ink); }
+  input[role="switch"]:checked::after { transform: translateX(12px); background: var(--ink); }
+  .physics { border-top: 1px solid var(--line); padding-top: 8px; }
   #means { margin: 14px 0 0; text-wrap: pretty; }
   #rules { margin: 6px 0 0; line-height: 1.6; }
   #error { margin: 12px 0 0; padding-left: 10px; border-left: 1px solid var(--ink); }
@@ -57,13 +78,31 @@
     <div id="stage"></div>
   </div>
   <div class="controls">
-    <label class="label" for="intensity">intensity</label>
-    <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.5">
-    <output id="value" for="intensity"></output>
-    <span class="label">theme</span>
-    <button id="theme" type="button" aria-label="Switch between the light and the dark theme"></button>
-    <span class="label">play</span>
-    <button id="play" type="button" aria-pressed="false">play</button>
+    <button id="play" type="button" aria-pressed="false" aria-label="Play the tour" title="Play the tour"><svg viewBox="0 0 12 12" aria-hidden="true"><path id="play-icon" d="M3 1.5v9l7.5-4.5z"/></svg></button>
+    <span class="control">
+      <label class="label" for="intensity" id="intensity-label">intensity</label>
+      <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.5">
+      <output id="value" for="intensity"></output>
+    </span>
+  </div>
+  <div class="controls" id="own" hidden></div>
+  <div class="controls physics">
+    <span class="control">
+      <label class="label" for="stiffness" title="How hard every spring pulls: soft to snappy">spring</label>
+      <input id="stiffness" type="range" min="0.2" max="4" step="0.05" value="1">
+      <output for="stiffness"></output>
+    </span>
+    <span class="control">
+      <label class="label" for="damping" title="How quickly motion settles: bouncy to calm">damping</label>
+      <input id="damping" type="range" min="0.2" max="4" step="0.05" value="1">
+      <output for="damping"></output>
+    </span>
+    <span class="control">
+      <label class="label" for="speed" title="How fast everything moves, the tour included">speed</label>
+      <input id="speed" type="range" min="0.1" max="4" step="0.05" value="1">
+      <output for="speed"></output>
+    </span>
+    <button id="feel-reset" type="button" title="Put spring, damping and speed back to the figure's own">reset</button>
   </div>
   <p id="means"></p>
   <p id="rules" class="label"></p>
@@ -74,20 +113,17 @@
 /*
  * The bench: the page a figure is shown on. It makes the host and the svg the
  * way the package's mount does, hands them to the figure, and owns everything
- * around it: the read-out, the slider, the theme, the line under the stage.
+ * around it: the read-out, the main slider, the figure's own controls, the
+ * physics sliders, the play button and the line under the stage. The theme is
+ * the system's (or ?theme=light / ?theme=dark); there is no switch for it.
  */
 (() => {
   const RULES = ["hit", "order", "reach", "accent", "rest", "honesty", "cost", "clock", "radius", "quiet"];
+  const KINDS = ["switch", "select", "button", "slider"];
   const $ = (id) => document.getElementById(id);
   const root = document.documentElement, params = new URLSearchParams(location.search);
 
-  /* the theme: the system's until the switch is pressed, then the switch's */
-  const dark = () => (root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches);
-  const label = () => { $("theme").textContent = dark() ? "dark" : "light"; };
-  $("theme").addEventListener("click", () => { root.dataset.theme = dark() ? "light" : "dark"; label(); });
-  /* ?theme=light or ?theme=dark wins over the system's, as pressing the switch does */
   if (["light", "dark"].includes(params.get("theme"))) root.dataset.theme = params.get("theme");
-  label();
 
   /* ?intensity=0 sets the slider before the figure mounts, for a look at either end */
   const i = (params.get("intensity") || "").trim();
@@ -102,6 +138,89 @@
     $("error").hidden = false;
     $("error").textContent = String((e.error && e.error.message) || e.message);
   });
+
+  /* physics: three sliders the whole page shares, read by every spring, tween and tour */
+  const FEEL = ["stiffness", "damping", "speed"];
+  const times = (n) => "×" + Number(n).toFixed(2).replace(/0$/, "");
+  const feel = () => {
+    const o = {};
+    for (const key of FEEL) {
+      o[key] = Number($(key).value);
+      document.querySelector(`output[for="${key}"]`).textContent = times(o[key]);
+    }
+    HL.setPhysics(o);
+  };
+  for (const key of FEEL) {
+    const given = Number(params.get(key));
+    if (params.has(key) && Number.isFinite(given)) $(key).value = String(given);
+    $(key).addEventListener("input", feel);
+  }
+  /* the figure may give its own starting feel; reset goes back to it */
+  let start = { stiffness: 1, damping: 1, speed: 1 };
+  const setFeel = (o) => { for (const key of FEEL) $(key).value = String(o[key]); feel(); };
+  $("feel-reset").addEventListener("click", () => setFeel(start));
+  feel();
+
+  const word = (s, fallback) => (typeof s === "string" && /^[a-z][a-z0-9 -]{0,15}$/.test(s) ? s : fallback);
+  /* a figure's own controls, at most four: each changes one thing in the figure through handle.input(id, value) */
+  const ownControls = (list, values, send) => {
+    const box = $("own");
+    for (const c of (Array.isArray(list) ? list : []).slice(0, 4)) {
+      if (!c || !KINDS.includes(c.kind) || typeof c.id !== "string") continue;
+      const id = "c-" + c.id.replace(/[^\w-]/g, ""), text = word(c.label, c.id);
+      const wrap = document.createElement("span");
+      wrap.className = c.kind === "slider" ? "control" : "control fixed";
+      const label = document.createElement("label");
+      label.className = "label";
+      label.htmlFor = id;
+      label.textContent = text;
+      let input;
+      if (c.kind === "switch") {
+        input = document.createElement("input");
+        input.type = "checkbox";
+        input.setAttribute("role", "switch");
+        input.checked = Boolean(c.value);
+        values[c.id] = input.checked;
+        input.addEventListener("change", () => send(c.id, input.checked));
+        wrap.append(label, input);
+      } else if (c.kind === "select") {
+        input = document.createElement("select");
+        for (const option of (Array.isArray(c.options) ? c.options : []).slice(0, 8)) {
+          const o = document.createElement("option");
+          o.value = o.textContent = String(option);
+          input.append(o);
+        }
+        if (c.value != null) input.value = String(c.value);
+        values[c.id] = input.value;
+        input.addEventListener("change", () => send(c.id, input.value));
+        wrap.append(label, input);
+      } else if (c.kind === "button") {
+        input = document.createElement("button");
+        input.type = "button";
+        input.textContent = text;
+        input.addEventListener("click", () => send(c.id, true));
+        wrap.append(input);
+      } else {
+        const lo = Number.isFinite(c.min) ? c.min : 0, hi = Number.isFinite(c.max) ? c.max : 1;
+        input = document.createElement("input");
+        input.type = "range";
+        input.min = String(lo);
+        input.max = String(hi);
+        input.step = String(Number.isFinite(c.step) ? c.step : (hi - lo) / 100);
+        input.value = String(Number.isFinite(c.value) ? c.value : (lo + hi) / 2);
+        const out = document.createElement("output");
+        out.htmlFor = id;
+        const show = () => { out.textContent = String(Math.round(Number(input.value) * 1000) / 1000); };
+        show();
+        values[c.id] = Number(input.value);
+        input.addEventListener("input", () => { show(); send(c.id, Number(input.value)); });
+        wrap.append(label, input, out);
+      }
+      input.id = id;
+      box.append(wrap);
+    }
+    box.hidden = !box.children.length;
+  };
 
   let mounted = false;
   window.hairline = (figure) => {
@@ -128,11 +247,25 @@
     document.title = "Hairline · " + figure.name;
     $("name").textContent = figure.name;
     $("means").textContent = figure.means;
+    $("intensity-label").textContent = word(figure.label, "intensity");
+    if (figure.physics && typeof figure.physics === "object") {
+      for (const key of FEEL) {
+        const n = Number(figure.physics[key]);
+        if (Number.isFinite(n)) start[key] = Math.min(Number($(key).max), Math.max(Number($(key).min), n));
+      }
+      if (!FEEL.some((key) => params.has(key))) setFeel(start);
+    }
     $("rules").textContent = figure.rules.map((n) => String(n).padStart(2, "0") + " " + RULES[n - 1]).join(" · ");
     const show = () => { $("value").textContent = String(at(Number(slider.value))); };
     show();
 
-    const handle = figure.mount({ stage, svg, read }, at(Number(slider.value)));
+    let handle = null;
+    const controls = {};
+    ownControls(figure.controls, controls, (id, value) => {
+      controls[id] = value;
+      if (handle && typeof handle.input === "function") handle.input(id, value);
+    });
+    handle = figure.mount({ stage, svg, read, controls: { ...controls } }, at(Number(slider.value)));
     if (text === null) read.textContent = "rest";
     slider.addEventListener("input", () => { show(); handle.set(at(Number(slider.value))); });
     window.hairline.figure = handle;
@@ -145,6 +278,9 @@
       if (was) { window.hairline.playing.stop(); window.hairline.playing = null; }
       else window.hairline.playing = HL.tour(stage, figure.tour || HL.LAP, (i) => { if (window.hairline.onStop) window.hairline.onStop(i); });
       play.setAttribute("aria-pressed", String(!was));
+      play.setAttribute("aria-label", was ? "Play the tour" : "Pause the tour");
+      play.title = play.getAttribute("aria-label");
+      $("play-icon").setAttribute("d", was ? "M3 1.5v9l7.5-4.5z" : "M2.5 1.5h2.5v9H2.5zM7 1.5h2.5v9H7z");
     });
     if (params.get("play") === "1") play.click();
 

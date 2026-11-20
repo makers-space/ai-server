@@ -29,7 +29,7 @@ These are the eight `look.mjs` takes. Four parameters in the address make them, 
 - `?w=240` narrows the page to 240px, the size of a thumbnail.
 - `?at=x,y` holds the pointer at a point of the 400 × 320 viewBox, for tools that cannot hover. x runs to the right and y down, from the viewBox's top-left corner. Take the point from your own figure: the screen point `P(x, y, z)` of the part you want answered, rounded. `P` exists only inside the page; `look.mjs` prints it for you.
 - `?intensity=` sets the slider, from 0 to 1, before the figure mounts.
-- `?theme=light` or `?theme=dark` sets the theme, as pressing its button does.
+- `?theme=light` or `?theme=dark` sets the theme. The page has no theme button: it follows the system, or the app it is shown in.
 
 | Shot | Picture | Address |
 | --- | --- | --- |

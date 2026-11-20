@@ -18,6 +18,10 @@
  *   handle    mount returns { set, destroy }
  *   declare   the file ends with hairline({ name, means, rules, range, tour, mount })
  *   tour      hairline() gives tour: three to six stops, each [x, y] in the viewBox or null, one of them a point; the figure never calls HL.tour
+ *   controls  hairline() may give label (one to sixteen lowercase characters, what the main slider changes) and
+ *             controls: at most four, each { id, kind, label } with kind switch, select, button or slider, a select
+ *             with two to eight options; a figure with controls returns input(id, value) from mount; and physics,
+ *             its starting feel { stiffness, damping, speed }: stiffness and damping 0.2 to 4, speed 0.1 to 4
  *   length    at most 200 lines
  */
 import { spawnSync } from "node:child_process";
@@ -190,6 +194,63 @@ function toured(code, shape) {
 }
 
 /**
+ * The figure's own controls, read from the hairline() call as text: at most
+ * four literal objects, each with an id and a kind the bench draws, and a
+ * figure that gives any answers them through input(id, value).
+ */
+const KINDS = ["switch", "select", "button", "slider"];
+const WORD = /^[a-z][a-z0-9 -]{0,15}$/;
+function controlled(code) {
+  const out = [];
+  const call = /\bhairline\s*\(\s*\{([\s\S]*?)\}\s*\)\s*;?\s*$/.exec(code);
+  if (!call) return out;
+  const body = call[1];
+  const label = /(?:^|[,{\s])label:\s*(["'`])([^"'`]*)\1/.exec(body.replace(/\bcontrols:\s*\[[\s\S]*$/, ""));
+  if (label && !WORD.test(label[2])) out.push(`controls: label "${label[2]}" names the main slider in one to sixteen lowercase letters, digits, spaces or hyphens.`);
+  const feel = /\bphysics:\s*\{([^{}]*)\}/.exec(body);
+  if (feel) {
+    for (const [key, lo] of [["stiffness", 0.2], ["damping", 0.2], ["speed", 0.1]]) {
+      const n = new RegExp(`\\b${key}:\\s*([^,\\s}]+)`).exec(feel[1])?.[1];
+      if (n !== undefined && !(Number(n) >= lo && Number(n) <= 4)) out.push(`controls: physics ${key} is ${n}; give a number from ${lo} to 4, or leave it out for 1.`);
+    }
+    const other = feel[1].split(",").map((s) => s.split(":")[0].trim()).filter((k) => k && !["stiffness", "damping", "speed"].includes(k));
+    if (other.length) out.push(`controls: physics takes stiffness, damping and speed, not ${other.join(", ")}.`);
+  }
+  const open = /\bcontrols:\s*\[/.exec(body);
+  if (!open) return out;
+  let depth = 0, end = -1;
+  for (let i = open.index + open[0].length - 1; i < body.length; i++) {
+    if (body[i] === "[") depth++;
+    else if (body[i] === "]" && --depth === 0) { end = i; break; }
+  }
+  if (end < 0) return [...out, "controls: the controls' brackets do not close."];
+  const items = [];
+  const inner = body.slice(open.index + open[0].length, end);
+  for (let i = 0, from = -1, d = 0; i < inner.length; i++) {
+    if (inner[i] === "{" && d++ === 0) from = i;
+    else if (inner[i] === "}" && --d === 0) items.push(inner.slice(from, i + 1));
+  }
+  if (!items.length) out.push("controls: give each control as a literal { id, kind, label }, or leave controls out.");
+  if (items.length > 4) out.push(`controls: ${items.length} controls. A figure has at most four: one idea, a few ways into it.`);
+  for (const item of items) {
+    const id = /\bid:\s*(["'`])([a-z][a-z0-9-]{0,23})\1/.exec(item)?.[2];
+    const kind = /\bkind:\s*(["'`])(\w+)\1/.exec(item)?.[2];
+    const said = /\blabel:\s*(["'`])([^"'`]*)\1/.exec(item)?.[2];
+    const name = id || item.replace(/\s+/g, " ").slice(0, 40);
+    if (!id) out.push(`controls: ${name} needs an id: lowercase letters, digits and hyphens.`);
+    if (!KINDS.includes(kind)) out.push(`controls: ${name} needs kind "switch", "select", "button" or "slider".`);
+    if (said !== undefined && !WORD.test(said)) out.push(`controls: ${name}'s label is one to sixteen lowercase letters, digits, spaces or hyphens.`);
+    if (kind === "select") {
+      const options = /\boptions:\s*\[([^\]]*)\]/.exec(item)?.[1];
+      const count = options ? options.split(",").map((s) => s.trim()).filter(Boolean).length : 0;
+      if (count < 2 || count > 8) out.push(`controls: ${name} is a select with ${count} option${count === 1 ? "" : "s"}; give it two to eight.`);
+    }
+  }
+  if (!/(?<![.\w$])input\s*[:(,}]/.test(code)) out.push("controls: the figure gives controls but mount returns no input(id, value). Answer each control there.");
+  return out;
+}
+
+/**
  * The syntax error that keeps the figure from loading, or nothing. The page
  * loads the figure as a module, so it is checked as one, by `node --check`:
  * the browser would stop at the same error and draw nothing.
@@ -234,6 +295,7 @@ export function validate(input) {
   out.push(...tweens(shape));
   out.push(...declared(code));
   out.push(...toured(code, shape));
+  out.push(...controlled(code));
   const lines = src.split("\n").length;
   if (lines > LIMIT) out.push(`length: the figure is ${lines} lines and the limit is ${LIMIT}. A figure this long is usually two ideas: cut the concept down to one.`);
   return out;
