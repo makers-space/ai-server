@@ -2933,7 +2933,7 @@ const presentMessage = (chat, message, index) => ({
     stats: message.stats?.evalCount ? message.stats : null,
     error: message.errorCode ? new OllamaError(message.errorCode).toJSON() : null,
     stopped: message.stopped,
-    steps: (message.steps || []).map((step) => ({ tool: step.tool, input: step.input, failed: step.failed || null })),
+    steps: (message.steps || []).map((step) => ({ tool: step.tool, input: step.input, failed: step.failed || null, ...(step.answer != null ? { answer: step.answer } : {}) })),
     unverified: message.unverified || [],
     attachments: message.attachmentIds.map((id) => chat.attachments.id(id)).filter(Boolean).map(presentAttachment),
     createdAt: message.createdAt
