@@ -12,7 +12,7 @@ import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
-    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
+    GenerationQueue, estimateTokens, extractText, createFilesClient, runSkillScript, skillRunnerReady, runInSandbox, sandboxReady, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
@@ -2104,8 +2104,40 @@ const hairlineChecks = async (code) => {
 // makes is saved back there. Only a script that ships with the skill is run, never code a model writes, so these
 // skills still say "Guidance only": the parts that have the model write its own program are not done here.
 const RUNNER_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'marketing-conversion-tracking': 'conversion-tracking' };
+// The skills whose own files are in the sandbox snapshot, by their folder there (/root/skills/<folder>). With sandboxes
+// set up, these lack nothing: their commands run, as programs a model writes, beside their files.
+const SANDBOX_SKILLS = { 'anthropic-docx': 'docx', 'anthropic-pptx': 'pptx', 'anthropic-xlsx': 'xlsx', 'anthropic-pdf': 'pdf', 'hairline-hairline-create': 'hairline-create', 'marketing-conversion-tracking': 'conversion-tracking', 'taste-taste-skill': 'taste', 'anatomy-anatomy': 'anatomy' };
 // Whose files a reply may reach: the sign-in of the person who sent the message.
 const filesScope = new AsyncLocalStorage();
+const personFiles = () => createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore() });
+const readPersonFiles = async (files, paths) => {
+    const read = [];
+    for (const one of paths) {
+        const file = await files.bytes(one);
+        read.push({ path: file.name, buffer: file.buffer });
+    }
+    return read;
+};
+// What a script or program made is saved beside the person's files, never over one of them.
+const savePersonFiles = async (files, folder, made) => {
+    if (made.length === 0) return '';
+    const names = made.map((file) => file.path).join(', ');
+    if (!folder || folder === '/') return `It made ${names}, but nothing was saved: call again with save_to, a folder in the user's FilesystemOne.`;
+    try {
+        await files.upload(folder, made);
+        return `Saved in ${folder}: ${names}. A name already taken there was not overwritten; that file was given a new name.`;
+    } catch {
+        return `It made ${names}, but they could not be saved in ${folder}.`;
+    }
+};
+const reportRun = (title, answer, saved) => {
+    const ended = answer.timedOut ? 'was stopped because it ran too long' : `finished with exit code ${answer.exitCode}`;
+    const left = (answer.skipped || []).length > 0 ? `Not returned, being past the limit on files: ${answer.skipped.join(', ')}.` : '';
+    const content = [`${title} ${ended}.`, answer.stdout && `It printed:\n${clip(answer.stdout, 6000)}`, answer.stderr && `Errors:\n${clip(answer.stderr, 3000)}`, saved, left].filter(Boolean).join('\n\n');
+    return { content, ...(answer.timedOut || answer.exitCode !== 0 ? { failed: 'failed' } : {}) };
+};
+const filesParameter = { type: 'array', items: { type: 'string' }, description: 'FilesystemOne paths of the files it works on, such as /docs/report.docx' };
+const saveParameter = { type: 'string', description: 'The FilesystemOne folder for the files it makes. Left out, the folder of the first file.' };
 const runnerFunction = (kind) => ({
     name: `${kind.replace(/-/g, '_')}_script`,
     label: `${kind} script`,
@@ -2117,8 +2149,8 @@ const runnerFunction = (kind) => ({
         properties: {
             script: { type: 'string', description: 'The script as the skill names it, such as scripts/office/validate.py' },
             args: { type: 'array', items: { type: 'string' }, description: 'The arguments, in order, each as one piece of text' },
-            files: { type: 'array', items: { type: 'string' }, description: "FilesystemOne paths of the files the script works on, such as /docs/report.docx" },
-            save_to: { type: 'string', description: 'The FilesystemOne folder for the files the script makes. Left out, the folder of the first file.' }
+            files: { ...filesParameter, description: 'FilesystemOne paths of the files the script works on, such as /docs/report.docx' },
+            save_to: { ...saveParameter, description: 'The FilesystemOne folder for the files the script makes. Left out, the folder of the first file.' }
         },
         required: ['script']
     },
@@ -2128,14 +2160,10 @@ const runnerFunction = (kind) => ({
         const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
         const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
         if (!script) return { content: 'Nothing was run. Name the script as the skill writes it, such as scripts/office/validate.py.', failed: 'failed' };
-        const files = createFilesClient({ baseUrl: process.env.FILESYSTEM_ONE_URL, accessToken: filesScope.getStore() });
+        const files = personFiles();
         let sent;
         try {
-            sent = [];
-            for (const one of paths) {
-                const file = await files.bytes(one);
-                sent.push({ path: file.name, data: file.buffer.toString('base64') });
-            }
+            sent = (await readPersonFiles(files, paths)).map((file) => ({ path: file.path, data: file.buffer.toString('base64') }));
         } catch {
             return { content: `Nothing was run. A file could not be read from the user's FilesystemOne: ${paths.join(', ')}. Check the path with them.`, failed: 'failed' };
         }
@@ -2145,32 +2173,68 @@ const runnerFunction = (kind) => ({
         } catch (error) {
             return { content: `Nothing was run. ${error.message}`, failed: 'failed' };
         }
-        const made = (answer.files || []).slice(0, 40);
-        const names = made.map((file) => file.path).join(', ');
-        let saved = '';
-        if (made.length > 0 && (!folder || folder === '/')) saved = `It made ${names}, but nothing was saved: call again with save_to, a folder in the user's FilesystemOne.`;
-        else if (made.length > 0) {
-            try {
-                await files.upload(folder, made.map((file) => ({ path: file.path, buffer: Buffer.from(file.data, 'base64') })));
-                saved = `Saved in ${folder}: ${names}. A name already taken there was not overwritten; that file was given a new name.`;
-            } catch {
-                saved = `It made ${names}, but they could not be saved in ${folder}.`;
-            }
-        }
-        const ended = answer.timedOut ? 'was stopped because it ran too long' : `finished with exit code ${answer.exitCode}`;
-        const content = [`${[script, ...args].join(' ')} ${ended}.`, answer.stdout && `It printed:\n${clip(answer.stdout, 6000)}`, answer.stderr && `Errors:\n${clip(answer.stderr, 3000)}`, saved].filter(Boolean).join('\n\n');
-        return { content, ...(answer.timedOut || answer.exitCode !== 0 ? { failed: 'failed' } : {}) };
+        const made = (answer.files || []).slice(0, 40).map((one) => ({ path: one.path, buffer: Buffer.from(one.data, 'base64') }));
+        return reportRun([script, ...args].join(' '), answer, await savePersonFiles(files, folder, made));
     }
 });
-const skillFunctionsFor = (chat) => skillsOf(chat).flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []), ...(RUNNER_SKILLS[skill.id] && skillRunnerReady() ? [runnerFunction(RUNNER_SKILLS[skill.id])] : [])].map((entry) => ({
+// A program the model writes, run in a sandbox: what most skills' commands come to, and what a skill that has the model
+// write its own build or check needs. It writes to the person's files, so it asks first.
+const MAX_PROGRAM_CHARS = 100000;
+const programFunction = () => ({
+    name: 'run_program',
+    label: 'Program',
+    doing: 'Running the program…',
+    changes: true,
+    description: `Runs a program you write in a computer of its own that has no network and is thrown away afterwards, and saves the files it makes to the user's FilesystemOne. It has Python 3 with python-docx, python-pptx, openpyxl, pandas, markitdown, pypdf, pdfplumber, pdf2image, pytesseract, reportlab and Pillow; Node with docx, pptxgenjs, react, react-dom, react-icons and sharp; and soffice (LibreOffice), chromium, pdftoppm, qpdf, pandoc and tesseract. A skill's own files are there: ${Object.entries(SANDBOX_SKILLS).map(([id, folder]) => `${SKILLS.find((skill) => skill.id === id)?.name || id} in /root/skills/${folder}`).join(', ')}. The program starts in an empty folder holding the files named in files, each under its own file name. Every file it makes or changes in that folder is saved to save_to, or beside the first file. Nothing is kept from one call to the next, so do the whole job in one program, which may run for up to five minutes.`,
+    parameters: {
+        type: 'object',
+        properties: {
+            language: { type: 'string', enum: ['python', 'node', 'bash'], description: 'What the program is written in' },
+            code: { type: 'string', description: 'The whole program' },
+            files: filesParameter,
+            save_to: saveParameter
+        },
+        required: ['language', 'code']
+    },
+    run: async (input) => {
+        const language = ['python', 'node', 'bash'].includes(input?.language) ? input.language : null;
+        const code = String(input?.code ?? '');
+        const paths = (Array.isArray(input?.files) ? input.files.map(String) : []).slice(0, 10);
+        const folder = String(input?.save_to || (paths[0] ? path.posix.dirname(paths[0]) : '')).trim();
+        if (!language) return { content: 'Nothing was run. Say what the program is written in: python, node or bash.', failed: 'failed' };
+        if (!code.trim()) return { content: 'Nothing was run. Give the whole program in code.', failed: 'failed' };
+        if (code.length > MAX_PROGRAM_CHARS) return { content: `Nothing was run. A program may be at most ${MAX_PROGRAM_CHARS.toLocaleString('en-GB')} characters.`, failed: 'failed' };
+        const files = personFiles();
+        let given;
+        try {
+            given = await readPersonFiles(files, paths);
+        } catch {
+            return { content: `Nothing was run. A file could not be read from the user's FilesystemOne: ${paths.join(', ')}. Check the path with them.`, failed: 'failed' };
+        }
+        let answer;
+        try {
+            answer = await runInSandbox({ language, code, files: given });
+        } catch (error) {
+            return { content: `Nothing was run. ${error.message}`, failed: 'failed' };
+        }
+        return reportRun(`The ${language} program`, answer, await savePersonFiles(files, folder, answer.files || []));
+    }
+});
+const asChatTool = (entry, shown) => ({
     fn: entry.name,
     label: entry.label,
     doing: entry.doing,
     changes: Boolean(entry.changes),
-    shown: () => skill.name,
+    shown,
     definition: { type: 'function', function: { name: entry.name, description: entry.description, parameters: entry.parameters } },
     run: async (input, context) => entry.run(input, context)
-})));
+});
+const skillFunctionsFor = (chat) => {
+    const active = skillsOf(chat);
+    const own = active.flatMap((skill) => [...(SKILL_FUNCTIONS[skill.id] || []), ...(RUNNER_SKILLS[skill.id] && skillRunnerReady() ? [runnerFunction(RUNNER_SKILLS[skill.id])] : [])].map((entry) => asChatTool(entry, () => skill.name)));
+    const writes = sandboxReady() && active.some((skill) => SANDBOX_SKILLS[skill.id] || (skill.needs || []).includes('commands'));
+    return writes ? [...own, asChatTool(programFunction(), (input) => `${['python', 'node', 'bash'].includes(input?.language) ? input.language : 'A'} program`)] : own;
+};
 // The level above a chat's own skills is the whole library, searched by a few words. A model cannot turn a skill on:
 // it names the one that would help, and the person turns it on.
 const LIBRARY_STEP = 'Skill library';
@@ -2398,7 +2462,7 @@ const openComponentTool = () => {
 };
 
 // A skill with functions of Mollama's own has its commands: they do what its scripts do.
-const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs: needs.filter((need) => need !== 'commands' || !SKILL_FUNCTIONS[id]), tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
+const presentSkill = ({ id, name, description, default: on, credit, source, needs, text, files = [] }) => ({ id, name, description, default: on, credit, source, needs: needs.filter((need) => !(SANDBOX_SKILLS[id] && sandboxReady()) && (need !== 'commands' || !SKILL_FUNCTIONS[id])), tokens: estimateTokens(text), suggested: SUGGESTED_SKILLS.includes(id), files: files.map((file) => file.path) });
 export const listSkills = asyncHandler(async (req, res) => {
     const servers = await ToolServer.find({ service: SERVICE, owner: req.user.id }).sort({ name: 1 });
     const all = [...SKILLS, ...await ownSkillsOf(req.user.id)];

@@ -925,6 +925,72 @@ export const setRunnerFetch = (replacement) => {
     runnerFetch = replacement || realFetch;
 };
 export const skillRunnerReady = () => Boolean(process.env.SKILL_RUNNER_URL && process.env.SKILL_RUNNER_SECRET);
+// A program a model writes runs in a Render sandbox: a small computer of its own, started from the prepared snapshot
+// (mkrspc-python/prepare_sandbox.py), with no network, none of this server's settings, and thrown away when the job ends.
+// This server only holds the key that starts it. It is optional: without the three settings no program is run.
+let sandboxClient = null;
+export const setSandboxClient = (replacement) => {
+    sandboxClient = replacement;
+};
+export const sandboxReady = () => Boolean(process.env.SANDBOX_API_KEY && process.env.SANDBOX_WORKSPACE_ID && process.env.SANDBOX_SNAPSHOT);
+const sandboxesOf = async () => {
+    if (sandboxClient) return sandboxClient;
+    const { Render } = await import('@renderinc/sdk');
+    return new Render({ token: process.env.SANDBOX_API_KEY, ownerId: process.env.SANDBOX_WORKSPACE_ID }).sandboxes;
+};
+const PROGRAM_RUNS = { python: ['python', 'py'], node: ['node', 'js'], bash: ['bash', 'sh'] };
+const SANDBOX_FILES = 40;
+const SANDBOX_BYTES = 25 * 1024 * 1024;
+export const runInSandbox = async ({ language, code, files = [], seconds = 300 }) => {
+    const [command, ending] = PROGRAM_RUNS[language] || PROGRAM_RUNS.python;
+    const sandboxes = await sandboxesOf();
+    let sandbox;
+    try {
+        sandbox = await sandboxes.create({ snapshotName: process.env.SANDBOX_SNAPSHOT, networkPolicy: { type: 'deny-all' }, timeoutSeconds: 900, idleTimeoutSeconds: 300, wait: { timeoutMs: 120000 } });
+    } catch (error) {
+        throw new Error(`A sandbox could not be started: ${String(error?.message || error).slice(0, 200)}`);
+    }
+    try {
+        const exec = async (line) => {
+            let stdout = '';
+            let stderr = '';
+            let exitCode = null;
+            for await (const event of await sandboxes.exec(sandbox.id, line)) {
+                if (event.type === 'output' && event.stream === 'stderr') stderr += event.data;
+                else if (event.type === 'output') stdout += event.data;
+                else if (event.type === 'exit') exitCode = event.exit_code;
+            }
+            return { stdout, stderr, exitCode };
+        };
+        await exec('mkdir -p /root/work /root/job');
+        for (const file of files) await sandboxes.upload(sandbox.id, `/root/work/${file.path}`, file.buffer);
+        await sandboxes.upload(sandbox.id, `/root/job/main.${ending}`, Buffer.from(code));
+        await exec('touch /root/job/.start');
+        const ran = await exec(`cd /root/work && export HOME=/root PATH=/root/env/bin:$PATH NODE_PATH=/root/node/node_modules && timeout -k 5 ${seconds} ${command} /root/job/main.${ending}`);
+        const listed = await exec(`cd /root/work && find . -type f -newer /root/job/.start | sed 's|^./||' | head -${SANDBOX_FILES + 1}`);
+        const made = [];
+        let size = 0;
+        const skipped = [];
+        for (const path of listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)) {
+            if (made.length >= SANDBOX_FILES) {
+                skipped.push(path);
+                continue;
+            }
+            const download = await sandboxes.download(sandbox.id, `/root/work/${path}`, undefined, { maxSizeBytes: SANDBOX_BYTES }).catch(() => null);
+            const buffer = download ? Buffer.from(download.data) : null;
+            if (!buffer || size + buffer.length > SANDBOX_BYTES) {
+                skipped.push(path);
+                continue;
+            }
+            size += buffer.length;
+            made.push({ path, buffer });
+        }
+        return { exitCode: ran.exitCode, timedOut: ran.exitCode === 124 || ran.exitCode === 137, stdout: ran.stdout, stderr: ran.stderr, files: made, skipped };
+    } finally {
+        await sandboxes.terminate(sandbox.id).catch(() => {});
+    }
+};
+
 export const runSkillScript = async (job, wait = 360000) => {
     const raw = JSON.stringify(job);
     const stamp = String(Date.now());
