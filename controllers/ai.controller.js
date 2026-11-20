@@ -1435,8 +1435,9 @@ export const getDeviceCatalogue = asyncHandler(async (req, res) => {
 });
 
 // A reply that opens a skill, reads four of its files, builds and then mends what it built needs eight on its own.
-const MAX_TOOL_ROUNDS = 10;
-const MAX_TOOL_CALLS = 4;
+// A reply has no limit on how many tools it uses or how long it runs: only Stop ends it early. A model that runs out
+// of room is asked to go on from where it stopped.
+const CARRY_ON = 'You ran out of room in the middle of your reply. Go on from exactly where you stopped, without repeating anything you already wrote.';
 const SEARCH_CONTEXT = 16384;
 const SEARCH_TOOLS = [
     {
@@ -1587,7 +1588,7 @@ const capacityFor = (chat, facts) => {
 };
 
 // What the models are told lives in server/instructions, and all of it is skills a chat turns on or off: skills/ holds
-// the one skill of Mollama's own, which makes its viewers work, and library/ holds skills from other projects, one
+// Mollama's own, the one that makes its viewers work and the map of what each skill is for, and library/ holds skills from other projects, one
 // folder per project. Nothing else is sent: no base instructions, no tool rules, no search rules. Credits and licences
 // are in THIRD_PARTY.md.
 const INSTRUCTIONS = path.join(import.meta.dirname, '..', 'instructions');
@@ -1598,9 +1599,20 @@ const readGuide = (file) => {
     const parts = `\n${text.slice(head?.[0].length || 0)}`.split(/\n=== ([A-Z ]+) ===\n/);
     return { facts, body: parts[0].trim(), part: (name) => (parts.includes(name) ? parts[parts.indexOf(name) + 1] : '').trim() };
 };
+// A skill may come with files of its own: the reference pages, examples and code its instructions name. They sit in a
+// folder named after the skill, beside its page, exactly as their project ships them. Only text files are kept.
+const SKILL_FILE_TYPES = /\.(md|txt|js|mjs|cjs|ts|tsx|jsx|json|html|css|svg|py|sh|ya?ml|csv)$/i;
+const MAX_SKILL_FILE_CHARS = 120000;
+const skillFilesIn = (folder, base = '') => (fs.existsSync(folder) ? fs.readdirSync(folder, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
+    if (entry.isDirectory()) return skillFilesIn(path.join(folder, entry.name), `${base}${entry.name}/`);
+    return SKILL_FILE_TYPES.test(entry.name) ? [{ path: `${base}${entry.name}`, bytes: fs.statSync(path.join(folder, entry.name)).size }] : [];
+}) : []);
 const OWN_SKILLS = fs.readdirSync(path.join(INSTRUCTIONS, 'skills')).filter((file) => file.endsWith('.md')).map((file) => {
     const guide = readGuide(path.join('skills', file));
+    const folder = path.join(INSTRUCTIONS, 'skills', file.slice(0, -3));
     return {
+        folder,
+        files: skillFilesIn(folder),
         id: file.slice(0, -3),
         name: guide.facts.name || file.slice(0, -3),
         description: guide.facts.description || '',
@@ -1633,14 +1645,6 @@ export const SKILL_SOURCES = {
     explainer: { name: 'Visual Explainer', repo: 'nicobailon/visual-explainer' }
 };
 const LIBRARY = path.join(INSTRUCTIONS, 'library');
-// A skill may come with files of its own: the reference pages, examples and code its instructions name. They sit in a
-// folder named after the skill, beside its page, exactly as their project ships them. Only text files are kept.
-const SKILL_FILE_TYPES = /\.(md|txt|js|mjs|cjs|ts|tsx|jsx|json|html|css|svg|py|sh|ya?ml|csv)$/i;
-const MAX_SKILL_FILE_CHARS = 120000;
-const skillFilesIn = (folder, base = '') => (fs.existsSync(folder) ? fs.readdirSync(folder, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
-    if (entry.isDirectory()) return skillFilesIn(path.join(folder, entry.name), `${base}${entry.name}/`);
-    return SKILL_FILE_TYPES.test(entry.name) ? [{ path: `${base}${entry.name}`, bytes: fs.statSync(path.join(folder, entry.name)).size }] : [];
-}) : []);
 // The text of one of a skill's files, or null when the skill has no such file. Only a path from the skill's own list
 // is ever read, so nothing outside its folder can be reached.
 export const skillFileText = (skill, wanted) => {
@@ -3032,7 +3036,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         const thinkRoom = facts.capabilities.includes('thinking') ? THINK_RESERVE : 0;
         // A skill that is only on by default is not given room ahead: most chats never open it, and the room grows
         // by itself in the round after one is opened.
-        const numCtx = sizeFor(messages, thinkRoom + listed.filter((skill) => Array.isArray(chat.skills) || skill.default !== 'tools').reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.length > 0 ? SKILL_FILE_ROOM : 0)));
+        const numCtx = sizeFor(messages, thinkRoom + listed.filter((skill) => Array.isArray(chat.skills) || skill.default !== 'tools').reduce((most, skill) => Math.max(most, estimateTokens(skill.text)), Math.max(draws && facts.capabilities.includes('tools') ? COMPONENT_ROOM : 0, withFiles.some((skill) => skill.source !== 'mollama') ? SKILL_FILE_ROOM : 0)));
         // The room a model is given grows with what the reply has gathered: a skill it opened, a file it read.
         let room = numCtx;
         let grew = false;
@@ -3046,19 +3050,19 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
         let evalSeconds = 0;
         let totalMs = 0;
         let promptEvalCount = null;
+        const results = new Map();
 
         try {
-            for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-                if (gone) break;
+            while (!gone) {
                 const request = {
                     model: chat.model,
                     messages,
                     stream: true,
-                    options: { num_predict: room, ...(chat.options || {}), num_ctx: room },
+                    options: { num_predict: -1, ...(chat.options || {}), num_ctx: room },
                     keep_alive: `${settings.keepAliveMinutes}m`
                 };
                 if (facts.capabilities.includes('thinking')) request.think = true;
-                if ((searching || chatTools.length > 0) && round < MAX_TOOL_ROUNDS) request.tools = [...(searching ? SEARCH_TOOLS : []), ...chatTools.map((tool) => tool.definition)];
+                if (searching || chatTools.length > 0) request.tools = [...(searching ? SEARCH_TOOLS : []), ...chatTools.map((tool) => tool.definition)];
 
                 room = Math.max(room, sizeFor(messages, thinkRoom));
                 const calls = [];
@@ -3120,7 +3124,8 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     }
                 }
                 // A reply that stopped because the model ran out of room is tried once more with more room when there is
-                // more to give. When there is not, the person is told it is incomplete instead of being left with nothing.
+                // more to give. After that the model is asked to go on from where it stopped, for as long as it keeps
+                // writing; only a turn that adds nothing ends it, and the person is then told it is incomplete.
                 if (endedBy === 'length' && calls.length === 0 && !gone) {
                     const more = !grew && !(Number(chat.options?.num_ctx) > 0) ? (CONTEXT_STEPS.find((step) => step > room && step <= capacity) || (capacity > room ? capacity : null)) : null;
                     if (more) {
@@ -3132,11 +3137,17 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         correcting = true;
                         continue;
                     }
-                    reply.errorCode = 'REPLY_CUT';
-                    break;
+                    if (!said.trim()) {
+                        reply.errorCode = 'REPLY_CUT';
+                        break;
+                    }
+                    messages.push({ role: 'assistant', content: said }, { role: 'user', content: CARRY_ON });
+                    write({ type: 'note', text: 'The model ran out of room. Asking it to go on…' });
+                    correcting = true;
+                    continue;
                 }
                 // What the model drew is checked once, and it is given one chance to put right what cannot be drawn.
-                if (calls.length === 0 && !gone && !corrected && draws && round < MAX_TOOL_ROUNDS) {
+                if (calls.length === 0 && !gone && !corrected && draws) {
                     const check = componentFaults(said);
                     if (check.faults.length > 0) {
                         corrected = true;
@@ -3158,7 +3169,6 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     write({ type: 'token', text: firstTry });
                 }
                 if (calls.length === 0 || gone) break;
-                calls.splice(MAX_TOOL_CALLS);
 
                 messages.push({ role: 'assistant', content: said, tool_calls: calls });
                 let ended = false;
@@ -3176,8 +3186,11 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                     reply.steps.push(step);
                     write({ type: 'note', text: doingOf(mine ? mine.fn : name, chatTools) });
                     write({ type: 'tool', tool: step.tool, input });
+                    // The same call made again in a reply is not run again: the model is given what it got before, so a
+                    // model that has lost its way is moved on instead of going round in circles.
+                    const same = `${mine ? mine.fn : name}\n${JSON.stringify(given ?? input)}`;
                     // Stop does not wait for a tool that is still running: a search, a page being read, a question to the person.
-                    const outcome = await Promise.race([
+                    const outcome = results.has(same) ? { content: `You already called ${mine ? mine.fn : name} with the same input in this reply. What it gave you then is above and has not changed: use it and go on with your answer.\n\n${clip(results.get(same), 2000)}` } : await Promise.race([
                         mine ? runChatTool(mine, given, { chat, userId, write, stopped: () => gone, show, kept })
                             : offered.includes(name) ? runSearchTool(name, input)
                                 : { content: `There is no function called ${clip(name, 60)}. The functions you can call are: ${offered.join(', ')}.`, failed: 'failed' },
@@ -3187,6 +3200,7 @@ const runTurn = async ({ chat, body, userId, res, live }) => {
                         step.failed = outcome.failed;
                         write({ type: 'toolFailed', failed: outcome.failed });
                     }
+                    if (!outcome.failed && !results.has(same)) results.set(same, String(outcome.content ?? ''));
                     messages.push({ role: 'tool', tool_name: name, content: outcome.content });
                     if (outcome.ends) ended = true;
                     if (gone || ended) break;
