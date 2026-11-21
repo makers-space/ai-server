@@ -351,7 +351,7 @@ class Server {
                         this.wss = new WebSocketServer({ server: this.httpServer });
                         const wsRoutes = [
                             { prefix: '/notifications', handle: (ws, req) => notificationService.handleConnection(ws, req) },
-                            { prefix: '/devices', handle: async (ws) => (await import('./controllers/ai.controller.js')).connectDevice(ws) }
+                            { prefix: '/devices', handle: async (ws, req) => (await import('./controllers/ai.controller.js')).connectDevice(ws, req) }
                         ];
                         this.wss.on('connection', async (ws, req) => {
                             try {

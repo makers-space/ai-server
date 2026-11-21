@@ -12,7 +12,7 @@ import { hasRight, RIGHTS } from '../config/rights.js';
 import { SERVICE, Device, Setting, PersonalModel, Download, Chat, Prompt, Guide, GUIDE_STEPS, MANAGER_GUIDE_STEPS, chatSchemas, ToolServer, Provider, Skill } from '../models/ai.model.js';
 import {
     OllamaError, mapOllamaError, UNREADABLE_CALL, memoryNeededMb, createOllamaClient, libraryModels, libraryEntries, loadLibrarySizes, librarySizes, friendlyName, cloudTitle, computerName, detectHardware, appleGpus, readDisk, rankCatalogue, fitModel, fitNotes, GPU_HEADROOM_MB, RAM_RESERVE_MB,
-    GenerationQueue, estimateTokens, extractText, createFilesClient, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, MAX_PROGRAM_SECONDS, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
+    GenerationQueue, estimateTokens, extractText, createFilesClient, imageTypeOf, MAX_IMAGE_BYTES, MAX_CHAT_IMAGE_BYTES, runInSandbox, sandboxReady, poolGroups, MAX_PROGRAM_SECONDS, MAX_ATTACHMENT_BYTES, fetchRemote, MAX_REMOTE_BYTES,
     searchReady, searchWeb, readPage, deviceGateway,
     CLOUD_PROVIDERS, PROVIDER_HEALTH, createCloudClient, ollamaOnlineNames, runsOnline,
     TOOL_HEALTH, TOOL_CATALOGUE, TOOL_LOCAL_CATALOGUE, toolKeyNeeded, listedTool, seal, unseal, accountKeeper, withToolServer, finishToolSignIn, readTools, toolFault, ToolSignInError
@@ -940,10 +940,24 @@ const setPaused = (paused) => asyncHandler(async (req, res) => {
 
     res.status(200).json({ success: true, device: presentDevice(device, await ollamaOf(device)) });
 });
+// Which of a person's computers can pool, and why the others cannot.
+export const listPools = asyncHandler(async (req, res) => {
+    const computers = (await ownDevices(req.user.id)).map((device) => ({
+        id: device.id,
+        name: shownName(device),
+        online: isOnline(device),
+        paused: Boolean(device.paused),
+        publicAddress: deviceGateway.publicAddress(device.id),
+        hardware: effectiveHardware(device) ? { ...effectiveHardware(device), network: device.hardware?.network } : device.hardware
+    }));
+    const { groups, left } = poolGroups(computers);
+    res.status(200).json({ success: true, groups, left });
+});
+
 export const pauseDevice = setPaused(true);
 export const resumeDevice = setPaused(false);
 
-export const connectDevice = (ws) => deviceGateway.handleConnection(ws, async (hello) => {
+export const connectDevice = (ws, req) => deviceGateway.handleConnection(ws, async (hello) => {
     if (!mongoose.isValidObjectId(hello.deviceId) || typeof hello.key !== 'string') return null;
     const device = await Device.findOne({ _id: hello.deviceId, service: SERVICE, kind: 'companion' }).select('+keyHash');
     if (!device?.keyHash) return null;
@@ -953,7 +967,7 @@ export const connectDevice = (ws) => deviceGateway.handleConnection(ws, async (h
     device.lastSeenAt = new Date();
     await device.save();
     return device.id;
-});
+}, req);
 
 const announceDevice = (online) => async (deviceId, hello, replaced = false) => {
     // A computer that reconnects while still counted as online has not changed, so nobody is told.
@@ -970,6 +984,16 @@ const announceDevice = (online) => async (deviceId, hello, replaced = false) => 
 deviceGateway.on('online', announceDevice(true));
 deviceGateway.on('online', (deviceId) => {
     downloads.resumeFor(deviceId).catch((error) => logger.warn('[Downloads] Could not resume downloads for a returning computer', { deviceId: String(deviceId), error: error.message }));
+});
+// A computer's details are read again whenever it connects: a laptop may have changed network since.
+deviceGateway.on('online', async (deviceId, hello, replaced) => {
+    if (replaced) return;
+    try {
+        const hardware = await deviceGateway.ask(deviceId, 'hardware');
+        if (hardware && typeof hardware === 'object') await Device.updateOne({ _id: deviceId, service: SERVICE, kind: 'companion' }, { hardware });
+    } catch {
+        // An app that does not answer keeps the details it last gave.
+    }
 });
 deviceGateway.on('offline', announceDevice(false));
 // Signing out of the desktop app takes that computer off the account.

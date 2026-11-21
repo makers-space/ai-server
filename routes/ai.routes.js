@@ -13,6 +13,7 @@ router.validRoutes = [
     '/api/v1/devices/:id',
     '/api/v1/devices/:id/detect',
     '/api/v1/devices/link',
+    '/api/v1/devices/pools',
     '/api/v1/devices/:id/pause',
     '/api/v1/devices/:id/resume',
     '/api/v1/settings',
@@ -78,6 +79,7 @@ router.use('/models', aiController.announceChanges('models:changed', ['/load']))
 router.use('/chats', aiController.announceChanges('chat:changed'));
 
 router.get('/devices', ...signedIn, aiController.listDevices);
+router.get('/devices/pools', ...signedIn, aiController.listPools);
 router.post('/devices/link', ...signedIn, validateRequest(deviceSchemas.link), aiController.linkDevice);
 router.delete('/devices/:id', ...signedIn, withDeviceId, aiController.unlinkDevice);
 router.get('/devices/:id', ...signedIn, withDeviceId, aiController.getDevice);

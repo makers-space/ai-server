@@ -349,7 +349,14 @@ export class DeviceGateway extends EventEmitter {
         return this.devices.has(String(deviceId));
     }
 
-    handleConnection(ws, verify) {
+    publicAddress(deviceId) {
+        return this.devices.get(String(deviceId))?.publicAddress || null;
+    }
+
+    // The address a link arrives from is kept in memory only, to tell which computers share a home network.
+    handleConnection(ws, verify, req = null) {
+        const forwarded = String(req?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
+        const publicAddress = forwarded || String(req?.socket?.remoteAddress || '').replace(/^::ffff:/, '') || null;
         const timer = setTimeout(() => ws.close(1008, 'No hello'), this.helloMs);
         timer.unref?.();
         ws.once('message', async (raw) => {
@@ -368,12 +375,12 @@ export class DeviceGateway extends EventEmitter {
                 return ws.close(1011, 'Try again');
             }
             if (!deviceId) return ws.close(1008, 'Device not recognised');
-            return this.attach(String(deviceId), ws, hello);
+            return this.attach(String(deviceId), ws, hello, publicAddress);
         });
     }
 
-    attach(deviceId, ws, hello = {}) {
-        const entry = { ws, pending: new Map() };
+    attach(deviceId, ws, hello = {}, publicAddress = null) {
+        const entry = { ws, pending: new Map(), publicAddress };
         const earlier = this.devices.get(deviceId);
         this.devices.set(deviceId, entry);
         earlier?.ws.close(1000, 'Replaced');
@@ -704,6 +711,79 @@ export const fitModel = (entry, hardware) => {
         memoryNeededMb: needed,
         tokensPerSecond: speedRange(verdict, entry)
     };
+};
+
+// Pooling: computers that can share one model are those on the same home network, found from what each desktop app
+// reports (its private addresses, never its public one) and the address its link arrives from. A direct cable between
+// two computers gives both a 169.254 address. Nothing is pooled on a network Windows marks Public.
+const ipv4 = (text) => {
+    const parts = String(text || '').split('.').map(Number);
+    return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255) ? parts : null;
+};
+export const privateKind = (address) => {
+    const [a, b] = ipv4(address) || [];
+    if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return 'home';
+    if (a === 169 && b === 254) return 'cable';
+    return null;
+};
+export const subnetOf = (address, prefix) => {
+    const parts = ipv4(address);
+    const bits = Number(prefix);
+    if (!parts || !Number.isInteger(bits) || bits < 8 || bits > 30) return null;
+    const value = parts.reduce((sum, part) => sum * 256 + part, 0);
+    const network = value - (value % 2 ** (32 - bits));
+    return `${[24, 16, 8, 0].map((shift) => Math.floor(network / 2 ** shift) % 256).join('.')}/${bits}`;
+};
+export const POOL_REASONS = {
+    offline: 'Not connected right now. Open the Mollama desktop app on it.',
+    paused: 'Paused. Resume it to pool it.',
+    update: 'Its desktop app is too old to say which network it is on. Update the Mollama desktop app on it.',
+    public: 'Windows marks its network as Public, so it is never pooled. Pool only on a home network you trust; if this is one, set the network to Private in Windows settings.',
+    nonetwork: 'It is not on a home network or a direct cable.',
+    alone: 'No other computer of yours is on the same network.',
+    online: 'This is an online service, not a computer.'
+};
+// computers: [{ id, name, online, paused, publicAddress, hardware }]. Gives the groups of two or more that can pool,
+// and for each computer left out, why.
+export const poolGroups = (computers) => {
+    const groups = new Map();
+    const reasons = new Map();
+    for (const computer of computers) {
+        const network = computer.hardware?.network;
+        if (!computer.online) reasons.set(computer.id, 'offline');
+        else if (computer.paused) reasons.set(computer.id, 'paused');
+        else if (!network || !Array.isArray(network.addresses)) reasons.set(computer.id, 'update');
+        else {
+            const usable = network.addresses.filter((entry) => privateKind(entry.address) && !(privateKind(entry.address) === 'home' && entry.category === 'public'));
+            if (usable.length === 0) {
+                reasons.set(computer.id, network.addresses.some((entry) => entry.category === 'public') ? 'public' : 'nonetwork');
+                continue;
+            }
+            for (const entry of usable) {
+                const subnet = subnetOf(entry.address, entry.prefix);
+                if (!subnet || !computer.publicAddress) continue;
+                const key = `${computer.publicAddress}|${subnet}`;
+                if (!groups.has(key)) groups.set(key, { network: subnet, via: privateKind(entry.address), computers: [] });
+                groups.get(key).computers.push({ id: computer.id, name: computer.name, address: entry.address, wired: Boolean(entry.wired), gpuMemoryMb: computer.hardware.gpuMemoryMb || 0, memoryMb: computer.hardware.memoryMb || 0 });
+            }
+        }
+    }
+    const shared = [...groups.values()].filter((group) => group.computers.length >= 2)
+        .map((group) => ({
+            ...group,
+            wired: group.computers.every((one) => one.wired),
+            combined: {
+                gpuMemoryMb: group.computers.reduce((sum, one) => sum + one.gpuMemoryMb, 0),
+                memoryMb: group.computers.reduce((sum, one) => sum + one.memoryMb, 0)
+            }
+        }))
+        .sort((a, b) => Number(b.via === 'cable') - Number(a.via === 'cable') || Number(b.wired) - Number(a.wired) || b.computers.length - a.computers.length);
+    const pooled = new Set(shared.flatMap((group) => group.computers.map((one) => one.id)));
+    const left = computers.filter((computer) => !pooled.has(computer.id)).map((computer) => {
+        const reason = reasons.get(computer.id) || 'alone';
+        return { id: computer.id, name: computer.name, reason, message: POOL_REASONS[reason] };
+    });
+    return { groups: shared, left };
 };
 
 export const fitNotes = (catalogue, hardware) => {

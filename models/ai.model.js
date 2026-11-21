@@ -8,6 +8,11 @@ const gpuSchema = new mongoose.Schema({
     memoryMb: { type: Number, required: true }
 }, { _id: false });
 
+// A computer's private network addresses, for pooling: never its public one.
+const networkSchema = new mongoose.Schema({
+    addresses: { type: [new mongoose.Schema({ address: String, prefix: Number, interface: String, wired: Boolean, category: String }, { _id: false })], default: [] }
+}, { _id: false });
+
 const hardwareSchema = new mongoose.Schema({
     hostname: String,
     platform: String,
@@ -19,6 +24,7 @@ const hardwareSchema = new mongoose.Schema({
     diskFreeMb: Number,
     diskTotalMb: Number,
     modelsPath: String,
+    network: { type: networkSchema, default: undefined },
     detectedAt: Date
 }, { _id: false });
 
@@ -112,6 +118,15 @@ export const deviceSchemas = {
             diskFreeMb: Joi.number().integer().min(0).allow(null),
             diskTotalMb: Joi.number().integer().min(0).allow(null),
             modelsPath: Joi.string().max(500).allow(null, ''),
+            network: Joi.object({
+                addresses: Joi.array().max(16).items(Joi.object({
+                    address: Joi.string().ip({ version: ['ipv4'], cidr: 'forbidden' }).required(),
+                    prefix: Joi.number().integer().min(0).max(32).required(),
+                    interface: Joi.string().max(120).allow(''),
+                    wired: Joi.boolean(),
+                    category: Joi.string().valid('public', 'private', 'domain').allow(null)
+                }))
+            }),
             detectedAt: Joi.date()
         })
     }),
